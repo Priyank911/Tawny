@@ -1,0 +1,41 @@
+# Dependencies
+node_modules/
+
+# Electron/Vite build output
+out/
+dist/
+dist-electron/
+
+# Local environment and secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.cert
+credentials.bin
+
+# Runtime data and logs
+*.log
+logs/
+coverage/
+playwright-report/
+test-results/
+
+# Local fixtures and generated job output
+fixtures/local/
+jobs/
+
+# OS/editor files
+.DS_Store
+Thumbs.db
+desktop.ini
+.idea/
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+
+# Temporary files
+*.tmp
+*.temp
+*.swp
