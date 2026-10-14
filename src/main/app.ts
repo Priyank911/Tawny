@@ -1,9 +1,16 @@
-import { app, BrowserWindow, globalShortcut, ipcMain, Menu, nativeImage, screen, Tray } from 'electron';
+import { app, BrowserWindow, globalShortcut, ipcMain, Menu, nativeImage, screen, session, Tray } from 'electron';
 import { join } from 'node:path';
+import { writeFile } from 'node:fs/promises';
 import { createActor } from 'xstate';
 import { pipelineMachine } from './pipeline/machine';
+import { gateTranscript } from './pipeline/gate';
+import { isImageGenerationRequest } from './pipeline/intent';
+import { pasteImage, pasteText } from './inject';
 import type { OverlaySnapshot } from '../shared/contracts';
 import { readProviderSettings, saveProviderSettings } from './settings';
+import { generateWithCloudflareFlux } from './providers/cloudflareFlux';
+import { transcribeWithGroq } from './providers/groqWhisper';
+import { getRecentLogs, logPipeline, setLogSink } from './logger';
 
 let mainWindow: BrowserWindow | undefined;
 let tray: Tray | undefined;
@@ -12,6 +19,9 @@ let readyTimer: NodeJS.Timeout | undefined;
 let quitting = false;
 let escapeRegistered = false;
 let backgroundMode = false;
+let activeJobId: string | undefined;
+let finalizingTimer: NodeJS.Timeout | undefined;
+let routingTimer: NodeJS.Timeout | undefined;
 const hasSingleInstanceLock = app.requestSingleInstanceLock();
 
 if (!hasSingleInstanceLock) {
@@ -65,16 +75,22 @@ function showOverlay(): void {
   mainWindow.webContents.send('app:background-mode');
   mainWindow.setSkipTaskbar(true);
   mainWindow.setResizable(false);
-  mainWindow.setSize(440, 210);
+  mainWindow.setSize(360, 150);
   mainWindow.setAlwaysOnTop(true, 'floating');
   const display = screen.getDisplayNearestPoint(screen.getCursorScreenPoint());
   const bounds = display.workArea;
   const windowBounds = mainWindow.getBounds();
-  const targetX = bounds.x + Math.round((bounds.width - windowBounds.width) / 2);
-  const targetY = bounds.y + 24;
+  const targetX = Math.round(bounds.x + (bounds.width - windowBounds.width) / 2);
+  const targetY = Math.round(bounds.y + 24);
   const startY = targetY - 44;
-  mainWindow.setPosition(targetX, startY);
+  if (![targetX, targetY, startY].every(Number.isFinite)) {
+    console.error('Unable to position Tawny overlay: display bounds were invalid.', { bounds, windowBounds });
+    mainWindow.center();
+  } else {
+    mainWindow.setPosition(targetX, startY);
+  }
   mainWindow.showInactive();
+  mainWindow.moveTop();
   console.log(`Tawny overlay shown at top-center of ${display.label}.`);
   const startedAt = Date.now();
   const duration = 240;
@@ -85,7 +101,8 @@ function showOverlay(): void {
     }
     const progress = Math.min(1, (Date.now() - startedAt) / duration);
     const eased = 1 - Math.pow(1 - progress, 3);
-    mainWindow.setPosition(targetX, Math.round(startY + (targetY - startY) * eased));
+    const nextY = Math.round(startY + (targetY - startY) * eased);
+    if (Number.isFinite(targetX) && Number.isFinite(nextY)) mainWindow.setPosition(targetX, nextY);
     if (progress === 1) clearInterval(animation);
   }, 16);
 }
@@ -95,7 +112,7 @@ function enterBackground(): void {
   if (!mainWindow) return;
   mainWindow.setSkipTaskbar(true);
   mainWindow.setResizable(false);
-  mainWindow.setSize(440, 210);
+  mainWindow.setSize(360, 150);
   mainWindow.setAlwaysOnTop(true, 'floating');
   mainWindow.hide();
 }
@@ -108,10 +125,42 @@ function openSettings(): void {
   mainWindow.webContents.send('settings:open');
 }
 
+function openLogs(): void {
+  if (!mainWindow) return;
+  backgroundMode = false;
+  mainWindow.setSkipTaskbar(false);
+  mainWindow.setResizable(false);
+  mainWindow.setSize(760, 560);
+  mainWindow.center();
+  mainWindow.show();
+  mainWindow.webContents.send('logs:open');
+}
+
+function stopRecording(): void {
+  if (snapshot.state !== 'recording') return;
+  if (readyTimer) {
+    clearTimeout(readyTimer);
+    readyTimer = undefined;
+  }
+  logPipeline({ event: 'capture.stop', message: 'Stopping capture and finalizing audio.', jobId: activeJobId, stage: 'capture' });
+  actor.send({ type: 'STOP' });
+  if (finalizingTimer) clearTimeout(finalizingTimer);
+  finalizingTimer = setTimeout(() => {
+    finalizingTimer = undefined;
+    if (snapshot.state !== 'finalizing') return;
+    const message = 'Audio finalization timed out before Groq transcription started.';
+    logPipeline({ level: 'error', event: 'capture.timeout', message, jobId: activeJobId, stage: 'capture', errorClass: 'environment' });
+    actor.send({ type: 'FAIL', message });
+  }, 35_000);
+}
+
 function setEscapeShortcut(enabled: boolean): void {
   if (enabled && !escapeRegistered) {
     escapeRegistered = globalShortcut.register('Escape', () => {
-      if (snapshot.state !== 'idle') actor.send({ type: 'CANCEL' });
+      if (snapshot.state !== 'idle') {
+        logPipeline({ event: 'escape.cancel', message: 'Escape pressed; cancelling active job.', jobId: activeJobId, errorClass: 'cancelled' });
+        actor.send({ type: 'CANCEL' });
+      }
     });
   } else if (!enabled && escapeRegistered) {
     globalShortcut.unregister('Escape');
@@ -136,6 +185,10 @@ function createTray(): void {
       label: 'Settings',
       click: openSettings
     },
+    {
+      label: 'Diagnostics',
+      click: openLogs
+    },
     { type: 'separator' },
     {
       label: 'Quit Tawny',
@@ -149,41 +202,198 @@ function createTray(): void {
 }
 
 const actor = createActor(pipelineMachine);
+setLogSink((entry) => mainWindow?.webContents.send('pipeline:log', entry));
 actor.subscribe((state) => {
-  snapshot = { ...snapshot, state: state.value as OverlaySnapshot['state'] };
+  const nextState = state.value as OverlaySnapshot['state'];
+  if (nextState === 'transcribing' && finalizingTimer) {
+    clearTimeout(finalizingTimer);
+    finalizingTimer = undefined;
+  }
+  if (nextState !== 'deciding' && routingTimer) {
+    clearTimeout(routingTimer);
+    routingTimer = undefined;
+  }
+  snapshot = {
+    ...snapshot,
+    state: nextState,
+    ...(typeof state.context.message === 'string' ? { message: state.context.message } : {})
+  };
+  logPipeline({
+    event: 'state.transition',
+    message: `Pipeline state: ${nextState}`,
+    jobId: activeJobId,
+    data: { state: nextState }
+  });
   setEscapeShortcut(state.value !== 'idle');
   mainWindow?.webContents.send('overlay:update', snapshot);
   if (state.value === 'idle' && mainWindow?.isVisible()) {
     const windowRef = mainWindow;
     setTimeout(() => {
-      if (windowRef.getSize()[1] !== 210) windowRef.setSize(440, 210);
+      if (windowRef.getSize()[1] !== 150) windowRef.setSize(360, 150);
       windowRef.hide();
     }, 450);
   }
 });
 actor.start();
 
+function showContextMenu(): void {
+  const menu = Menu.buildFromTemplate([
+    { label: 'Open diagnostics', click: openLogs },
+    { label: 'Settings', click: openSettings },
+    { type: 'separator' },
+    {
+      label: snapshot.state === 'recording' ? 'Finish capture' : 'Cancel current job',
+      enabled: snapshot.state !== 'idle' && snapshot.state !== 'done',
+      click: () => snapshot.state === 'recording' ? stopRecording() : actor.send({ type: 'CANCEL' })
+    }
+  ]);
+  menu.popup({ window: mainWindow });
+}
+
+function handlePipelineEvent(event: 'HOTKEY' | 'STOP' | 'CANCEL' | 'CONFIRM'): void {
+  if (event === 'STOP') {
+    stopRecording();
+    return;
+  }
+  actor.send({ type: event });
+}
+
 ipcMain.handle('overlay:get-snapshot', () => snapshot);
+ipcMain.handle('logs:get', () => getRecentLogs());
+ipcMain.on('capture:log', (_event, input: { event: string; message: string; level?: 'debug' | 'info' | 'warn' | 'error'; data?: Record<string, string> }) => {
+  logPipeline({ ...input, jobId: activeJobId, stage: 'capture' });
+  if (input.event === 'capture.failure') actor.send({ type: 'FAIL', message: input.message });
+});
 ipcMain.handle('app:enter-background', () => enterBackground());
 ipcMain.handle('settings:get', () => readProviderSettings());
-ipcMain.handle('settings:save', (_event, settings) => saveProviderSettings(settings));
-ipcMain.on('pipeline:event', (_event, event: 'HOTKEY' | 'STOP' | 'CANCEL' | 'CONFIRM') => actor.send({ type: event }));
+ipcMain.handle('settings:save', async (_event, settings) => {
+  await saveProviderSettings(settings);
+  logPipeline({ event: 'settings.saved', message: 'Provider settings saved securely.' });
+});
+ipcMain.handle('image:generate', async (_event, prompt: unknown) => {
+  const startedAt = Date.now();
+  const settings = await readProviderSettings();
+  if (typeof prompt !== 'string') {
+    logPipeline({ level: 'error', event: 'image.invalid_input', message: 'Image prompt was not text.', jobId: activeJobId, stage: 'handle', errorClass: 'input' });
+    throw new Error('Image prompt must be text.');
+  }
+  logPipeline({ event: 'provider.start', message: 'Starting Cloudflare Flux image generation.', jobId: activeJobId, stage: 'handle', provider: 'cloudflare-flux' });
+  try {
+    const result = await generateWithCloudflareFlux(settings.cloudflareAccountId, settings.cloudflareApiToken, { prompt });
+    logPipeline({ event: 'provider.success', message: 'Cloudflare Flux returned an image.', jobId: activeJobId, stage: 'handle', provider: 'cloudflare-flux', durationMs: Date.now() - startedAt });
+    return result;
+  } catch (error) {
+    logPipeline({ level: 'error', event: 'provider.failure', message: error instanceof Error ? error.message : 'Cloudflare Flux failed.', jobId: activeJobId, stage: 'handle', provider: 'cloudflare-flux', durationMs: Date.now() - startedAt });
+    throw error;
+  }
+});
+ipcMain.handle('audio:transcribe', async (_event, audio: Uint8Array) => {
+  const startedAt = Date.now();
+  const settings = await readProviderSettings();
+  logPipeline({ event: 'provider.start', message: 'Uploading captured audio to Groq Whisper.', jobId: activeJobId, stage: 'stt', provider: 'groq-whisper', data: { bytes: String(audio?.byteLength ?? 0) } });
+  try {
+    const transcript = await transcribeWithGroq(settings.groqApiKey, audio);
+    if (!transcript) throw new Error('Groq returned an empty transcript.');
+    logPipeline({ event: 'provider.success', message: 'Groq Whisper returned a transcript.', jobId: activeJobId, stage: 'stt', provider: 'groq-whisper', durationMs: Date.now() - startedAt });
+    snapshot = { ...snapshot, message: `Heard: ${transcript}` };
+    mainWindow?.webContents.send('overlay:update', snapshot);
+    actor.send({ type: 'STAGE', stage: 'gating' });
+    const gate = gateTranscript(transcript);
+    logPipeline({
+      event: 'gate.result',
+      message: gate.routed ? 'Wake phrase accepted.' : 'Wake phrase not detected.',
+      jobId: activeJobId,
+      stage: 'gate',
+      data: { routed: String(gate.routed), commandLength: String(gate.text.length) }
+    });
+    if (!gate.routed) {
+      logPipeline({ event: 'gate.dictation', message: 'No wake phrase; treating transcript as plain dictation.', jobId: activeJobId, stage: 'gate' });
+      actor.send({ type: 'STAGE', stage: 'deciding' });
+      if (!isImageGenerationRequest(transcript)) {
+        await pasteText(transcript);
+        logPipeline({ event: 'inject.success', message: 'Dictation pasted into the previously focused application.', jobId: activeJobId, stage: 'inject' });
+        actor.send({ type: 'SUCCESS', message: 'Dictation pasted.' });
+        return transcript;
+      }
+      logPipeline({ event: 'decision.result', message: 'Image intent detected in plain dictation.', jobId: activeJobId, stage: 'decide', data: { intent: 'image_generate' } });
+      const settings = await readProviderSettings();
+      const image = await generateWithCloudflareFlux(settings.cloudflareAccountId, settings.cloudflareApiToken, { prompt: transcript });
+      const outputPath = join(app.getPath('userData'), `tawny-image-${Date.now()}.jpg`);
+      await writeFile(outputPath, Buffer.from(image.base64, 'base64'));
+      logPipeline({ event: 'image.saved', message: 'Cloudflare Flux image saved locally.', jobId: activeJobId, stage: 'handle', provider: 'cloudflare-flux', data: { path: outputPath } });
+      await pasteImage(image.base64);
+      logPipeline({ event: 'image.inject.success', message: 'Generated image copied to the clipboard and pasted into the previously focused application.', jobId: activeJobId, stage: 'inject' });
+      snapshot = { ...snapshot, imageDataUrl: `data:${image.mimeType};base64,${image.base64}`, message: 'Image ready.' };
+      mainWindow?.webContents.send('overlay:update', snapshot);
+      actor.send({ type: 'SUCCESS', message: 'Image ready.' });
+      return transcript;
+    }
+    logPipeline({ event: 'gate.advance', message: 'Advancing from wake-phrase gate to decision stage.', jobId: activeJobId, stage: 'gate' });
+    actor.send({ type: 'STAGE', stage: 'deciding' });
+    if (snapshot.state !== 'deciding') {
+      const message = 'Wake phrase gate did not advance to the decision stage.';
+      logPipeline({ level: 'error', event: 'pipeline.transition.failure', message, jobId: activeJobId, stage: 'decide', errorClass: 'environment' });
+      actor.send({ type: 'FAIL', message });
+      return transcript;
+    }
+    const imageIntent = isImageGenerationRequest(gate.text);
+    logPipeline({ event: 'decision.result', message: imageIntent ? 'Image intent detected.' : 'Plain dictation intent detected.', jobId: activeJobId, stage: 'decide', data: { intent: imageIntent ? 'image_generate' : 'plain_text' } });
+    if (imageIntent) {
+      const settings = await readProviderSettings();
+      const image = await generateWithCloudflareFlux(settings.cloudflareAccountId, settings.cloudflareApiToken, { prompt: gate.text });
+      const outputPath = join(app.getPath('userData'), `tawny-image-${Date.now()}.jpg`);
+      await writeFile(outputPath, Buffer.from(image.base64, 'base64'));
+      logPipeline({ event: 'image.saved', message: 'Cloudflare Flux image saved locally.', jobId: activeJobId, stage: 'handle', provider: 'cloudflare-flux', data: { path: outputPath } });
+      await pasteImage(image.base64);
+      logPipeline({ event: 'image.inject.success', message: 'Generated image copied to the clipboard and pasted into the previously focused application.', jobId: activeJobId, stage: 'inject' });
+      snapshot = { ...snapshot, imageDataUrl: `data:${image.mimeType};base64,${image.base64}`, message: 'Image ready.' };
+      mainWindow?.webContents.send('overlay:update', snapshot);
+      actor.send({ type: 'SUCCESS', message: 'Image ready.' });
+    } else {
+      await pasteText(gate.text);
+      logPipeline({ event: 'inject.success', message: 'Command pasted into the previously focused application.', jobId: activeJobId, stage: 'inject' });
+      actor.send({ type: 'SUCCESS', message: 'Dictation complete.' });
+    }
+    return transcript;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Groq transcription failed.';
+    logPipeline({ level: 'error', event: 'provider.failure', message, jobId: activeJobId, stage: 'stt', provider: 'groq-whisper', durationMs: Date.now() - startedAt, errorClass: 'permanent' });
+    actor.send({ type: 'FAIL', message });
+    throw error;
+  }
+});
+ipcMain.on('pipeline:event', (_event, event: 'HOTKEY' | 'STOP' | 'CANCEL' | 'CONFIRM') => handlePipelineEvent(event));
 
 app.whenReady().then(() => {
+  session.defaultSession.setPermissionRequestHandler((webContents, permission, callback) => {
+    const allowed = permission === 'media' && webContents.getType() === 'window';
+    callback(allowed);
+  });
+  session.defaultSession.setPermissionCheckHandler((_webContents, permission) => permission === 'media');
   createWindow();
+  mainWindow?.webContents.on('context-menu', () => showContextMenu());
   createTray();
   const shortcut = 'Ctrl+Alt+Space';
   const registered = globalShortcut.register(shortcut, () => {
     if (!mainWindow) return;
     if (snapshot.state === 'idle' || snapshot.state === 'done' || snapshot.state === 'failed' || snapshot.state === 'cancelled') {
+      activeJobId = `job-${Date.now().toString(36)}`;
+      snapshot = { ...snapshot, imageDataUrl: undefined, message: undefined };
+      logPipeline({ event: 'hotkey.start', message: 'Global shortcut received; starting a new job.', jobId: activeJobId, stage: 'capture' });
       showOverlay();
       actor.send({ type: 'HOTKEY' });
-      readyTimer = setTimeout(() => actor.send({ type: 'AUDIO_READY' }), 180);
+      readyTimer = setTimeout(() => {
+        logPipeline({ event: 'capture.ready', message: 'Capture window is ready for audio.', jobId: activeJobId, stage: 'capture' });
+        actor.send({ type: 'AUDIO_READY' });
+      }, 180);
     } else if (snapshot.state === 'recording') {
-      actor.send({ type: 'STOP' });
+      logPipeline({ event: 'hotkey.stop', message: 'Global shortcut received; stopping capture.', jobId: activeJobId, stage: 'capture' });
+      stopRecording();
     } else if (snapshot.state === 'confirming') {
+      logPipeline({ event: 'hotkey.confirm', message: 'Global shortcut received; confirming action.', jobId: activeJobId, stage: 'decide' });
       actor.send({ type: 'CONFIRM' });
     } else {
+      logPipeline({ event: 'hotkey.cancel', message: 'Global shortcut received; cancelling active job.', jobId: activeJobId, errorClass: 'cancelled' });
       actor.send({ type: 'CANCEL' });
     }
   });

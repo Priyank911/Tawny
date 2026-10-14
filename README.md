@@ -29,7 +29,7 @@ The product direction is:
 3. Route supported actions.
 4. Return the result to the previously focused application.
 
-The current repository contains the desktop shell, first-run page, compact overlay, tray lifecycle, secure provider settings, pipeline state machine, and policy/gating foundations. Provider calls, microphone capture, native clipboard injection, and packaging are still being implemented in subsequent phases.
+The current repository contains the desktop shell, first-run page, compact overlay, tray lifecycle, secure provider settings, microphone capture, Groq Whisper transcription, and wake-phrase routing. Decision execution, native clipboard injection, and packaging are still being implemented in subsequent phases.
 
 ## Current experience
 
@@ -41,6 +41,7 @@ The current repository contains the desktop shell, first-run page, compact overl
 - `Esc` cancels an active pipeline state.
 - The overlay is frameless, rounded, transparent outside its light surface, and always on top while active.
 - The interface uses local Windows typography and `lucide-react` icons; no external font or icon network request is required.
+- The main page includes a live pipeline log, and the tray menu exposes the same view as **Diagnostics**.
 
 ## Requirements
 
@@ -90,9 +91,10 @@ The current settings form supports:
 | Setting | Intended use |
 | --- | --- |
 | Groq API key | Whisper transcription |
-| Gemini API key | Image generation |
 | Cloudflare account ID | Workers AI account |
-| Cloudflare API token | Workers AI access |
+| Cloudflare API token | Workers AI inference and image generation |
+
+Tawny uses Cloudflare Workers AI model `@cf/black-forest-labs/flux-1-schnell` for image generation. The request is sent to the documented account AI Run endpoint with a prompt and diffusion-step count; the returned base64 JPEG is validated before it enters the pipeline.
 
 Tawny writes encrypted credentials to Electron’s per-user application data directory. They are not stored in this repository, `.env` files, renderer local storage, or logs. `.env` files remain ignored for future development tooling and local test fixtures.
 
@@ -135,16 +137,47 @@ Security boundaries:
 - Provider credentials stored through Electron `safeStorage`
 - Single-instance Electron lock
 
+## Debugging pipeline runs
+
+Open **Live log** from the main page, the **Diagnostics** button on the compact overlay, or **Diagnostics** from the Tawny tray menu. You can also right-click the Electron window to open diagnostics, settings, or cancel the current job. Entries are emitted as the job moves through capture and provider boundaries:
+
+```text
+hotkey.start → state.transition: arming → capture.ready → state.transition: recording
+capture.permission.request → capture.recording → hotkey.stop
+capture.finalized → provider.start → provider.success | provider.failure
+escape.cancel → state.transition: cancelled
+```
+
+The live viewer shows recent events and durations. Tawny also writes newline-delimited JSON to:
+
+```text
+%APPDATA%/Tawny/logs/pipeline.jsonl
+```
+
+The exact directory is the Electron `app.getPath("userData")` directory for the current Windows user. API keys and transcript contents are never written to these logs. If a run reaches `finalizing` before the capture/STT implementation is available, Tawny now emits `pipeline.blocked` with `provider: groq-whisper` and fails visibly instead of remaining busy indefinitely.
+
+For microphone troubleshooting, the expected capture sequence is:
+
+```text
+capture.permission.request
+capture.recording
+capture.finalized (bytes > 0)
+provider.start (groq-whisper)
+provider.success
+```
+
+If `capture.permission.request` is followed by `capture.failure`, Windows or Electron denied microphone access. If `capture.finalized` reports `bytes: 0`, the recorder produced no audio. If `capture.finalized` is present but `provider.failure` follows, the issue is the Groq key, network request, model, or API response.
+
 ## Brand assets
 
 The reusable Tawny mark is [public/tawny-mark.svg](./public/tawny-mark.svg). It is used by the renderer favicon, application identity, and tray icon.
 
 ## Roadmap
 
-- [ ] Real microphone capture and audio persistence
-- [ ] Groq Whisper provider with retries and fallback
+- [x] Microphone capture and Groq Whisper transcription
+- [x] Wake-phrase gate and image-intent routing
 - [ ] Cloudflare/local decision providers
-- [ ] Gemini image generation provider
+- [x] Cloudflare Flux image provider contract and validated client
 - [ ] Native Windows target-window capture
 - [ ] Clipboard backup, paste, restore, and elevation checks
 - [ ] Fault-injection and Electron end-to-end tests

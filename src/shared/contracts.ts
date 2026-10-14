@@ -50,6 +50,7 @@ export const overlaySnapshotSchema = z.object({
   elapsedMs: z.number().nonnegative().default(0),
   rms: z.number().min(0).max(1).default(0),
   message: z.string().optional(),
+  imageDataUrl: z.string().optional(),
   target: targetWindowSchema.optional()
 });
 export type OverlaySnapshot = z.infer<typeof overlaySnapshotSchema>;
@@ -72,8 +73,35 @@ export type Action =
 
 export const providerSettingsSchema = z.object({
   groqApiKey: z.string().default(''),
-  geminiApiKey: z.string().default(''),
   cloudflareAccountId: z.string().default(''),
   cloudflareApiToken: z.string().default('')
 });
 export type ProviderSettings = z.infer<typeof providerSettingsSchema>;
+
+export const logLevelSchema = z.enum(['debug', 'info', 'warn', 'error']);
+export type LogLevel = z.infer<typeof logLevelSchema>;
+
+export const pipelineLogSchema = z.object({
+  timestamp: z.string(),
+  level: logLevelSchema,
+  event: z.string(),
+  message: z.string(),
+  jobId: z.string().optional(),
+  stage: stageSchema.optional(),
+  provider: z.string().optional(),
+  durationMs: z.number().nonnegative().optional(),
+  errorClass: errorClassSchema.optional(),
+  data: z.record(z.string(), z.string()).optional()
+});
+export type PipelineLog = z.infer<typeof pipelineLogSchema>;
+
+export const fluxImageResponseSchema = z.object({
+  image: z.string().min(1)
+});
+
+export const cloudflareEnvelopeSchema = z.object({
+  result: fluxImageResponseSchema,
+  success: z.boolean(),
+  errors: z.array(z.unknown()).default([]),
+  messages: z.array(z.unknown()).default([])
+});
