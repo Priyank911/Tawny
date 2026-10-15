@@ -27,12 +27,57 @@ export const pipelineMachine = createMachine({
     idle: { on: { HOTKEY: 'arming' } },
     arming: { on: { AUDIO_READY: 'recording', CANCEL: 'cancelled' } },
     recording: { on: { STOP: 'finalizing', CANCEL: 'cancelled' } },
-    finalizing: { on: { STAGE: { target: 'transcribing' }, CANCEL: 'cancelled', FAIL: { target: 'failed', actions: assign({ message: ({ event }) => event.message }) } } },
-    transcribing: { on: { STAGE: { target: 'gating' }, FAIL: { target: 'failed', actions: assign({ message: ({ event }) => event.message }) }, CANCEL: 'cancelled' } },
-    gating: { on: { STAGE: { target: 'deciding' }, SUCCESS: 'done', FAIL: { target: 'failed', actions: assign({ message: ({ event }) => event.message }) }, CANCEL: 'cancelled' } },
-    deciding: { on: { STAGE: { target: 'confirming' }, SUCCESS: 'done', FAIL: { target: 'failed', actions: assign({ message: ({ event }) => event.message }) }, CANCEL: 'cancelled' } },
+    finalizing: {
+      on: {
+        STAGE: [
+          { guard: ({ event }) => event.stage === 'gating', target: 'gating' },
+          { guard: ({ event }) => event.stage === 'deciding', target: 'deciding' },
+          { target: 'transcribing' }
+        ],
+        SUCCESS: 'done',
+        CANCEL: 'cancelled',
+        FAIL: { target: 'failed', actions: assign({ message: ({ event }) => event.message }) }
+      }
+    },
+    transcribing: {
+      on: {
+        STAGE: [
+          { guard: ({ event }) => event.stage === 'deciding', target: 'deciding' },
+          { guard: ({ event }) => event.stage === 'handling', target: 'handling' },
+          { guard: ({ event }) => event.stage === 'injecting', target: 'injecting' },
+          { target: 'gating' }
+        ],
+        SUCCESS: 'done',
+        FAIL: { target: 'failed', actions: assign({ message: ({ event }) => event.message }) },
+        CANCEL: 'cancelled'
+      }
+    },
+    gating: {
+      on: {
+        STAGE: [
+          { guard: ({ event }) => event.stage === 'handling', target: 'handling' },
+          { guard: ({ event }) => event.stage === 'injecting', target: 'injecting' },
+          { target: 'deciding' }
+        ],
+        SUCCESS: 'done',
+        FAIL: { target: 'failed', actions: assign({ message: ({ event }) => event.message }) },
+        CANCEL: 'cancelled'
+      }
+    },
+    deciding: {
+      on: {
+        STAGE: [
+          { guard: ({ event }) => event.stage === 'handling', target: 'handling' },
+          { guard: ({ event }) => event.stage === 'injecting', target: 'injecting' },
+          { target: 'confirming' }
+        ],
+        SUCCESS: 'done',
+        FAIL: { target: 'failed', actions: assign({ message: ({ event }) => event.message }) },
+        CANCEL: 'cancelled'
+      }
+    },
     confirming: { on: { CONFIRM: 'handling', HOTKEY: 'handling', CANCEL: 'cancelled' } },
-    handling: { on: { STAGE: { target: 'injecting' }, FAIL: 'failed', CANCEL: 'cancelled' } },
+    handling: { on: { STAGE: { target: 'injecting' }, SUCCESS: 'done', FAIL: 'failed', CANCEL: 'cancelled' } },
     injecting: { on: { SUCCESS: 'done', FAIL: 'failed', CANCEL: 'cancelled' } },
     done: { after: { 5000: 'idle' }, on: { HOTKEY: 'arming' } },
     failed: { after: { 6000: 'idle' }, on: { HOTKEY: 'arming' } },

@@ -11,6 +11,7 @@ import { readProviderSettings, saveProviderSettings } from './settings';
 import { generateWithCloudflareFlux } from './providers/cloudflareFlux';
 import { transcribeWithGroq } from './providers/groqWhisper';
 import { getRecentLogs, logPipeline, setLogSink } from './logger';
+import { startKeyWatcher, watchKeyRelease, cancelKeyReleaseWatch, makeWindowTopmost, stopKeyWatcher } from './keywatcherService';
 
 let mainWindow: BrowserWindow | undefined;
 let tray: Tray | undefined;
@@ -22,6 +23,7 @@ let backgroundMode = false;
 let activeJobId: string | undefined;
 let finalizingTimer: NodeJS.Timeout | undefined;
 let routingTimer: NodeJS.Timeout | undefined;
+let stopPending = false;
 const hasSingleInstanceLock = app.requestSingleInstanceLock();
 
 if (!hasSingleInstanceLock) {
@@ -75,36 +77,33 @@ function showOverlay(): void {
   mainWindow.webContents.send('app:background-mode');
   mainWindow.setSkipTaskbar(true);
   mainWindow.setResizable(false);
-  mainWindow.setSize(360, 150);
-  mainWindow.setAlwaysOnTop(true, 'floating');
+  mainWindow.setSize(620, 72);
+  mainWindow.setFocusable(false);
+
   const display = screen.getDisplayNearestPoint(screen.getCursorScreenPoint());
   const bounds = display.workArea;
-  const windowBounds = mainWindow.getBounds();
-  const targetX = Math.round(bounds.x + (bounds.width - windowBounds.width) / 2);
-  const targetY = Math.round(bounds.y + 24);
-  const startY = targetY - 44;
-  if (![targetX, targetY, startY].every(Number.isFinite)) {
-    console.error('Unable to position Tawny overlay: display bounds were invalid.', { bounds, windowBounds });
-    mainWindow.center();
+  const targetX = Math.round(bounds.x + (bounds.width - 620) / 2);
+  const targetY = Math.round(bounds.y + 16);
+
+  if (Number.isFinite(targetX) && Number.isFinite(targetY)) {
+    mainWindow.setPosition(targetX, targetY);
   } else {
-    mainWindow.setPosition(targetX, startY);
+    mainWindow.center();
   }
+
+  // Ensure window is always on top and in front of all open applications
+  mainWindow.setAlwaysOnTop(true, 'screen-saver', 1);
+  mainWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
   mainWindow.showInactive();
   mainWindow.moveTop();
-  console.log(`Tawny overlay shown at top-center of ${display.label}.`);
-  const startedAt = Date.now();
-  const duration = 240;
-  const animation = setInterval(() => {
-    if (!mainWindow || mainWindow.isDestroyed()) {
-      clearInterval(animation);
-      return;
-    }
-    const progress = Math.min(1, (Date.now() - startedAt) / duration);
-    const eased = 1 - Math.pow(1 - progress, 3);
-    const nextY = Math.round(startY + (targetY - startY) * eased);
-    if (Number.isFinite(targetX) && Number.isFinite(nextY)) mainWindow.setPosition(targetX, nextY);
-    if (progress === 1) clearInterval(animation);
-  }, 16);
+
+  try {
+    const handle = mainWindow.getNativeWindowHandle();
+    const hwnd = process.arch === 'x64' ? handle.readBigInt64LE(0) : handle.readInt32LE(0);
+    makeWindowTopmost(hwnd);
+  } catch (err) {
+    console.warn('Native topmost assertion notice:', err);
+  }
 }
 
 function enterBackground(): void {
@@ -112,14 +111,17 @@ function enterBackground(): void {
   if (!mainWindow) return;
   mainWindow.setSkipTaskbar(true);
   mainWindow.setResizable(false);
-  mainWindow.setSize(360, 150);
-  mainWindow.setAlwaysOnTop(true, 'floating');
+  mainWindow.setSize(620, 72);
+  mainWindow.setFocusable(false);
+  mainWindow.setAlwaysOnTop(true, 'screen-saver', 1);
   mainWindow.hide();
 }
 
 function openSettings(): void {
   if (!mainWindow) return;
   mainWindow.setSize(560, 520);
+  mainWindow.setFocusable(true);
+  mainWindow.setAlwaysOnTop(false);
   mainWindow.center();
   mainWindow.show();
   mainWindow.webContents.send('settings:open');
@@ -131,18 +133,27 @@ function openLogs(): void {
   mainWindow.setSkipTaskbar(false);
   mainWindow.setResizable(false);
   mainWindow.setSize(760, 560);
+  mainWindow.setFocusable(true);
+  mainWindow.setAlwaysOnTop(false);
   mainWindow.center();
   mainWindow.show();
   mainWindow.webContents.send('logs:open');
 }
 
 function stopRecording(): void {
-  if (snapshot.state !== 'recording') return;
+  if (snapshot.state !== 'recording') {
+    if (snapshot.state === 'arming') {
+      stopPending = true;
+    }
+    return;
+  }
+  stopPending = false;
+  cancelKeyReleaseWatch();
   if (readyTimer) {
     clearTimeout(readyTimer);
     readyTimer = undefined;
   }
-  logPipeline({ event: 'capture.stop', message: 'Stopping capture and finalizing audio.', jobId: activeJobId, stage: 'capture' });
+  logPipeline({ event: 'capture.stop', message: 'Stopping capture and finalizing audio automatically.', jobId: activeJobId, stage: 'capture' });
   actor.send({ type: 'STOP' });
   if (finalizingTimer) clearTimeout(finalizingTimer);
   finalizingTimer = setTimeout(() => {
@@ -229,7 +240,7 @@ actor.subscribe((state) => {
   if (state.value === 'idle' && mainWindow?.isVisible()) {
     const windowRef = mainWindow;
     setTimeout(() => {
-      if (windowRef.getSize()[1] !== 150) windowRef.setSize(360, 150);
+      if (windowRef.getSize()[1] !== 72) windowRef.setSize(620, 72);
       windowRef.hide();
     }, 450);
   }
@@ -290,6 +301,7 @@ ipcMain.handle('image:generate', async (_event, prompt: unknown) => {
 ipcMain.handle('audio:transcribe', async (_event, audio: Uint8Array) => {
   const startedAt = Date.now();
   const settings = await readProviderSettings();
+  actor.send({ type: 'STAGE', stage: 'transcribing' });
   logPipeline({ event: 'provider.start', message: 'Uploading captured audio to Groq Whisper.', jobId: activeJobId, stage: 'stt', provider: 'groq-whisper', data: { bytes: String(audio?.byteLength ?? 0) } });
   try {
     const transcript = await transcribeWithGroq(settings.groqApiKey, audio);
@@ -297,6 +309,7 @@ ipcMain.handle('audio:transcribe', async (_event, audio: Uint8Array) => {
     logPipeline({ event: 'provider.success', message: 'Groq Whisper returned a transcript.', jobId: activeJobId, stage: 'stt', provider: 'groq-whisper', durationMs: Date.now() - startedAt });
     snapshot = { ...snapshot, message: `Heard: ${transcript}` };
     mainWindow?.webContents.send('overlay:update', snapshot);
+
     actor.send({ type: 'STAGE', stage: 'gating' });
     const gate = gateTranscript(transcript);
     logPipeline({
@@ -306,54 +319,38 @@ ipcMain.handle('audio:transcribe', async (_event, audio: Uint8Array) => {
       stage: 'gate',
       data: { routed: String(gate.routed), commandLength: String(gate.text.length) }
     });
-    if (!gate.routed) {
-      logPipeline({ event: 'gate.dictation', message: 'No wake phrase; treating transcript as plain dictation.', jobId: activeJobId, stage: 'gate' });
-      actor.send({ type: 'STAGE', stage: 'deciding' });
-      if (!isImageGenerationRequest(transcript)) {
-        await pasteText(transcript);
-        logPipeline({ event: 'inject.success', message: 'Dictation pasted into the previously focused application.', jobId: activeJobId, stage: 'inject' });
-        actor.send({ type: 'SUCCESS', message: 'Dictation pasted.' });
-        return transcript;
-      }
-      logPipeline({ event: 'decision.result', message: 'Image intent detected in plain dictation.', jobId: activeJobId, stage: 'decide', data: { intent: 'image_generate' } });
-      const settings = await readProviderSettings();
-      const image = await generateWithCloudflareFlux(settings.cloudflareAccountId, settings.cloudflareApiToken, { prompt: transcript });
-      const outputPath = join(app.getPath('userData'), `tawny-image-${Date.now()}.jpg`);
-      await writeFile(outputPath, Buffer.from(image.base64, 'base64'));
-      logPipeline({ event: 'image.saved', message: 'Cloudflare Flux image saved locally.', jobId: activeJobId, stage: 'handle', provider: 'cloudflare-flux', data: { path: outputPath } });
-      await pasteImage(image.base64);
-      logPipeline({ event: 'image.inject.success', message: 'Generated image copied to the clipboard and pasted into the previously focused application.', jobId: activeJobId, stage: 'inject' });
-      snapshot = { ...snapshot, imageDataUrl: `data:${image.mimeType};base64,${image.base64}`, message: 'Image ready.' };
-      mainWindow?.webContents.send('overlay:update', snapshot);
-      actor.send({ type: 'SUCCESS', message: 'Image ready.' });
-      return transcript;
-    }
-    logPipeline({ event: 'gate.advance', message: 'Advancing from wake-phrase gate to decision stage.', jobId: activeJobId, stage: 'gate' });
+
     actor.send({ type: 'STAGE', stage: 'deciding' });
-    if (snapshot.state !== 'deciding') {
-      const message = 'Wake phrase gate did not advance to the decision stage.';
-      logPipeline({ level: 'error', event: 'pipeline.transition.failure', message, jobId: activeJobId, stage: 'decide', errorClass: 'environment' });
-      actor.send({ type: 'FAIL', message });
-      return transcript;
-    }
-    const imageIntent = isImageGenerationRequest(gate.text);
-    logPipeline({ event: 'decision.result', message: imageIntent ? 'Image intent detected.' : 'Plain dictation intent detected.', jobId: activeJobId, stage: 'decide', data: { intent: imageIntent ? 'image_generate' : 'plain_text' } });
-    if (imageIntent) {
-      const settings = await readProviderSettings();
-      const image = await generateWithCloudflareFlux(settings.cloudflareAccountId, settings.cloudflareApiToken, { prompt: gate.text });
+
+    // Check if this is an image generation request
+    const isImage = isImageGenerationRequest(gate.routed ? gate.text : transcript)
+      || isImageGenerationRequest(transcript);
+
+    if (isImage) {
+      const promptText = gate.routed && gate.text ? gate.text : transcript;
+      logPipeline({ event: 'decision.result', message: 'Image intent detected.', jobId: activeJobId, stage: 'decide', data: { intent: 'image_generate', prompt: promptText } });
+      actor.send({ type: 'STAGE', stage: 'handling' });
+      const image = await generateWithCloudflareFlux(settings.cloudflareAccountId, settings.cloudflareApiToken, { prompt: promptText });
       const outputPath = join(app.getPath('userData'), `tawny-image-${Date.now()}.jpg`);
       await writeFile(outputPath, Buffer.from(image.base64, 'base64'));
       logPipeline({ event: 'image.saved', message: 'Cloudflare Flux image saved locally.', jobId: activeJobId, stage: 'handle', provider: 'cloudflare-flux', data: { path: outputPath } });
+      actor.send({ type: 'STAGE', stage: 'injecting' });
       await pasteImage(image.base64);
       logPipeline({ event: 'image.inject.success', message: 'Generated image copied to the clipboard and pasted into the previously focused application.', jobId: activeJobId, stage: 'inject' });
       snapshot = { ...snapshot, imageDataUrl: `data:${image.mimeType};base64,${image.base64}`, message: 'Image ready.' };
       mainWindow?.webContents.send('overlay:update', snapshot);
       actor.send({ type: 'SUCCESS', message: 'Image ready.' });
-    } else {
-      await pasteText(gate.text);
-      logPipeline({ event: 'inject.success', message: 'Command pasted into the previously focused application.', jobId: activeJobId, stage: 'inject' });
-      actor.send({ type: 'SUCCESS', message: 'Dictation complete.' });
+      return transcript;
     }
+
+    // Normal sentence / dictation input: paste text directly at cursor pointer
+    logPipeline({ event: 'decision.result', message: 'Dictation intent detected; pasting text at cursor.', jobId: activeJobId, stage: 'decide', data: { intent: 'plain_text' } });
+    actor.send({ type: 'STAGE', stage: 'injecting' });
+    await pasteText(transcript);
+    logPipeline({ event: 'inject.success', message: 'Dictation pasted into the previously focused application.', jobId: activeJobId, stage: 'inject' });
+    snapshot = { ...snapshot, message: transcript };
+    mainWindow?.webContents.send('overlay:update', snapshot);
+    actor.send({ type: 'SUCCESS', message: 'Dictation complete.' });
     return transcript;
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Groq transcription failed.';
@@ -365,6 +362,7 @@ ipcMain.handle('audio:transcribe', async (_event, audio: Uint8Array) => {
 ipcMain.on('pipeline:event', (_event, event: 'HOTKEY' | 'STOP' | 'CANCEL' | 'CONFIRM') => handlePipelineEvent(event));
 
 app.whenReady().then(() => {
+  startKeyWatcher();
   session.defaultSession.setPermissionRequestHandler((webContents, permission, callback) => {
     const allowed = permission === 'media' && webContents.getType() === 'window';
     callback(allowed);
@@ -377,17 +375,28 @@ app.whenReady().then(() => {
   const registered = globalShortcut.register(shortcut, () => {
     if (!mainWindow) return;
     if (snapshot.state === 'idle' || snapshot.state === 'done' || snapshot.state === 'failed' || snapshot.state === 'cancelled') {
+      stopPending = false;
       activeJobId = `job-${Date.now().toString(36)}`;
       snapshot = { ...snapshot, imageDataUrl: undefined, message: undefined };
-      logPipeline({ event: 'hotkey.start', message: 'Global shortcut received; starting a new job.', jobId: activeJobId, stage: 'capture' });
+      logPipeline({ event: 'hotkey.start', message: 'Global shortcut received; starting push-to-talk capture.', jobId: activeJobId, stage: 'capture' });
       showOverlay();
       actor.send({ type: 'HOTKEY' });
+
+      // Instant release detection: when user releases the hotkey, audio finalizes and sends automatically
+      watchKeyRelease(() => {
+        logPipeline({ event: 'hotkey.release', message: 'Shortcut released; finalizing capture.', jobId: activeJobId, stage: 'capture' });
+        stopRecording();
+      });
+
       readyTimer = setTimeout(() => {
         logPipeline({ event: 'capture.ready', message: 'Capture window is ready for audio.', jobId: activeJobId, stage: 'capture' });
         actor.send({ type: 'AUDIO_READY' });
-      }, 180);
+        if (stopPending) {
+          stopRecording();
+        }
+      }, 160);
     } else if (snapshot.state === 'recording') {
-      logPipeline({ event: 'hotkey.stop', message: 'Global shortcut received; stopping capture.', jobId: activeJobId, stage: 'capture' });
+      logPipeline({ event: 'hotkey.stop', message: 'Global shortcut toggle received; stopping capture.', jobId: activeJobId, stage: 'capture' });
       stopRecording();
     } else if (snapshot.state === 'confirming') {
       logPipeline({ event: 'hotkey.confirm', message: 'Global shortcut received; confirming action.', jobId: activeJobId, stage: 'decide' });
@@ -406,6 +415,7 @@ app.whenReady().then(() => {
 app.on('will-quit', () => {
   if (readyTimer) clearTimeout(readyTimer);
   globalShortcut.unregisterAll();
+  stopKeyWatcher();
   escapeRegistered = false;
 });
 app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(); });

@@ -1,16 +1,8 @@
 import { StrictMode, useEffect, useMemo, useRef, useState, type ReactElement } from 'react';
 import { createRoot } from 'react-dom/client';
-import { Check, Keyboard, LoaderCircle, Mic, ScrollText, Settings2, ShieldCheck, X } from 'lucide-react';
+import { ChevronRight, Image as ImageIcon, LoaderCircle, Sparkles, ScrollText, Settings2, X, Keyboard, ShieldCheck } from 'lucide-react';
 import type { OverlaySnapshot, PipelineLog, ProviderSettings } from '../shared/contracts';
 import './styles.css';
-
-const bars = [18, 30, 46, 26, 38, 20];
-
-function Waveform({ rms }: { rms: number }): ReactElement {
-  return <div className="waveform" aria-label="Live microphone level">{bars.map((height, index) => (
-    <span key={height} style={{ height: `${Math.max(8, height * (0.55 + rms))}px`, animationDelay: `${index * 70}ms` }} />
-  ))}</div>;
-}
 
 function App(): ReactElement {
   const [snapshot, setSnapshot] = useState<OverlaySnapshot>({ state: 'idle', elapsedMs: 0, rms: 0 });
@@ -107,20 +99,20 @@ function App(): ReactElement {
     return undefined;
   }, [state]);
   const label = useMemo(() => ({
-    idle: ['Ready when you are', 'Ctrl + Alt + Space'],
-    arming: ['Starting microphone', 'Preparing capture'],
-    recording: ['Listening', 'Release or press the check to finish'],
-    finalizing: ['Finishing capture', 'Saving audio securely'],
-    transcribing: ['Transcribing', 'Converting speech to text'],
-    gating: ['Checking wake phrase', 'Routing your words'],
-    deciding: ['Deciding', 'Understanding the request'],
-    confirming: ['Generate image?', 'Hotkey to confirm · 3s'],
-    handling: ['Generating image', 'Keeping your original prompt'],
-    injecting: ['Pasting at the caret', 'Returning focus to your app'],
-    done: [snapshot.imageDataUrl ? 'Image ready' : 'Done', snapshot.imageDataUrl ? 'Preview generated locally' : 'Returned to your app'],
-    failed: ['Something went wrong', snapshot.message ?? 'Retry from the tray'],
+    idle: ['Ready', 'Ctrl + Alt + Space'],
+    arming: ['Listening', 'Speak now'],
+    recording: ['Listening', 'Release to send'],
+    finalizing: ['Finishing', 'Saving audio'],
+    transcribing: ['Transcribing', 'Groq Whisper'],
+    gating: ['Routing', 'Evaluating wake phrase'],
+    deciding: ['Routing', 'Understanding request'],
+    confirming: ['Generate image?', 'Press Enter to confirm'],
+    handling: ['Generating image', 'Cloudflare Flux'],
+    injecting: ['Pasting', 'Returning to your app'],
+    done: [snapshot.imageDataUrl ? 'Image ready' : 'Dictation ready', snapshot.imageDataUrl ? 'Preview generated locally' : 'Pasted at cursor'],
+    failed: ['Something went wrong', snapshot.message ?? 'Retry with hotkey'],
     cancelled: ['Cancelled', 'Nothing was sent']
-  } as Record<string, [string, string]>)[state] ?? ['Tawny', ''], [state, snapshot.message]);
+  } as Record<string, [string, string]>)[state] ?? ['Tawny', ''], [state, snapshot.message, snapshot.imageDataUrl]);
 
   const isListening = state === 'recording' || state === 'arming';
   const isBusy = ['transcribing', 'gating', 'deciding', 'handling', 'injecting', 'finalizing'].includes(state);
@@ -133,30 +125,115 @@ function App(): ReactElement {
 
   return (
     <main className={`app-shell state-${state} ${mainPage ? 'main-page' : 'overlay-page'}`}>
-      <header className="topbar"><div className="brand"><img className="brand-mark" src="/tawny-mark.svg" alt="" /><span>Tawny</span></div><div className="top-actions"><span className="status-dot" /><span className="status-label">READY</span>{mainPage && <><button className="main-settings-button" onClick={() => setLogsOpen(true)}><ScrollText size={13} /> Live log</button><button className="main-settings-button" onClick={() => setSettingsOpen(true)}><SettingsIcon /> Settings</button></>}</div></header>
-      {mainPage ? <section className="welcome-page">
-        <div className="welcome-copy">
-          <span className="eyebrow">PRIVATE DESKTOP VOICE LAYER</span>
-          <h1>Speak naturally.<br /><em>Work precisely.</em></h1>
-          <p>Tawny listens for your shortcut, understands what you mean, and returns the result to the app already in focus.</p>
-          <div className="welcome-actions"><button className="launch-button" onClick={() => { setMainPage(false); void window.voiceRouter?.enterBackground(); }}>Run in background <KeyboardIcon /></button><button className="secondary-button" onClick={() => setSettingsOpen(true)}><SettingsIcon /> Configure providers</button></div>
-        </div>
-        <div className="welcome-preview">
-          <div className="preview-orbit orbit-one" /><div className="preview-orbit orbit-two" />
-          <div className="preview-card"><img src="/tawny-mark.svg" alt="" /><strong>Ready when you are</strong><span>Ctrl + Alt + Space</span></div>
-        </div>
-      </section> : <section className="overlay-body">
-        <div className="state-rail"><span className="state-index">{state === 'idle' ? 'READY' : state.toUpperCase()}</span></div>
-        <div className={`control-card ${state === 'confirming' ? 'confirm-card' : ''} ${state === 'failed' ? 'error-card' : ''}`}>
-          <div className="control-visual">
-            {isListening ? <><button className="round-button danger" onClick={() => window.voiceRouter?.send('CANCEL')} aria-label="Cancel"><X size={14} /></button><Waveform rms={snapshot.rms} /><button className="round-button confirm" onClick={() => window.voiceRouter?.send('STOP')} aria-label="Finish recording"><Check size={15} /></button></> : isBusy ? <LoaderCircle className="spinner" size={28} /> : state === 'done' ? <div className="done-ring"><Check size={17} /></div> : <div className="mic-glyph"><Mic size={18} /></div>}
+      {mainPage ? (
+        <>
+          <header className="topbar">
+            <div className="brand">
+              <img className="brand-mark" src="/tawny-mark.svg" alt="" />
+              <span>Tawny</span>
+            </div>
+            <div className="top-actions">
+              <span className="status-dot" />
+              <span className="status-label">READY</span>
+              <button className="main-settings-button" onClick={() => setLogsOpen(true)}><ScrollText size={13} /> Live log</button>
+              <button className="main-settings-button" onClick={() => setSettingsOpen(true)}><SettingsIcon /> Settings</button>
+            </div>
+          </header>
+          <section className="welcome-page">
+            <div className="welcome-copy">
+              <span className="eyebrow">PRIVATE DESKTOP VOICE LAYER</span>
+              <h1>Speak naturally.<br /><em>Work precisely.</em></h1>
+              <p>Tawny listens for your shortcut, understands what you mean, and returns the result to the app already in focus.</p>
+              <div className="welcome-actions">
+                <button className="launch-button" onClick={() => { setMainPage(false); void window.voiceRouter?.enterBackground(); }}>
+                  Run in background <KeyboardIcon />
+                </button>
+                <button className="secondary-button" onClick={() => setSettingsOpen(true)}>
+                  <SettingsIcon /> Configure providers
+                </button>
+              </div>
+            </div>
+            <div className="welcome-preview">
+              <div className="preview-orbit orbit-one" />
+              <div className="preview-orbit orbit-two" />
+              <div className="preview-card">
+                <img src="/tawny-mark.svg" alt="" />
+                <strong>Ready when you are</strong>
+                <span>Ctrl + Alt + Space</span>
+              </div>
+            </div>
+          </section>
+        </>
+      ) : (
+        <div className="tawny-overlay-wrapper">
+          <div className="tawny-floating-pill">
+            <div className="notch-handle" />
+
+            {/* Brand Section */}
+            <div className="pill-brand">
+              <div className="brand-badge">
+                <img className="brand-logo" src="/tawny-mark.svg" alt="Tawny" />
+              </div>
+              <span className="brand-title">Tawny</span>
+            </div>
+
+            <div className="pill-divider" />
+
+            {/* Status & Dynamic Info Section */}
+            <div className="pill-status-area">
+              <div className="status-indicator-box">
+                {isListening ? (
+                  <div className="listening-pulse">
+                    <span className="pulse-dot" />
+                  </div>
+                ) : isBusy ? (
+                  <LoaderCircle className="status-spinner" size={17} />
+                ) : state === 'done' ? (
+                  <div className="status-badge-circle done">
+                    <span className="inner-dot" />
+                  </div>
+                ) : state === 'failed' ? (
+                  <div className="status-badge-circle error">
+                    <span className="inner-dot" />
+                  </div>
+                ) : (
+                  <div className="status-badge-circle ready">
+                    <span className="inner-dot" />
+                  </div>
+                )}
+              </div>
+              <div className="status-text-stack">
+                <strong className="status-headline">{label[0]}</strong>
+                <span className="status-subline">{label[1]}</span>
+              </div>
+              <Sparkles className="pill-sparkle" size={15} />
+            </div>
+
+            <div className="pill-divider" />
+
+            {/* Preview & Action Section */}
+            <div className="pill-action-area">
+              {snapshot.imageDataUrl ? (
+                <img className="pill-preview-image" src={snapshot.imageDataUrl} alt="Preview" />
+              ) : (
+                <div className="pill-preview-placeholder">
+                  <ImageIcon size={16} strokeWidth={1.75} />
+                </div>
+              )}
+              {state === 'confirming' ? (
+                <button className="confirm-btn" onClick={() => window.voiceRouter?.send('CONFIRM')}>
+                  Confirm <kbd>Enter</kbd>
+                </button>
+              ) : (
+                <div className="pill-ready-tag">
+                  <span>{state === 'recording' ? 'REC' : state === 'finalizing' || state === 'transcribing' ? 'WAIT' : 'READY'}</span>
+                  <ChevronRight size={11} strokeWidth={2.5} />
+                </div>
+              )}
+            </div>
           </div>
-          <div className="control-copy"><strong>{label[0]}</strong><span>{label[1]}</span></div>
-          {snapshot.imageDataUrl && state === 'done' && <img className="result-image" src={snapshot.imageDataUrl} alt="Generated result" />}
-          {state === 'confirming' && <button className="confirm-action" onClick={() => window.voiceRouter?.send('CONFIRM')}>Confirm <kbd>Enter</kbd></button>}
         </div>
-        <p className="hint"><KeyboardIcon /> <span><kbd>Ctrl</kbd> <kbd>Alt</kbd> <kbd>Space</kbd> toggle</span><span className="hint-divider" /><ShieldCheck size={13} /> <span>Private by default</span></p>
-      </section>}
+      )}
       {settingsOpen && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.currentTarget === event.target) setSettingsOpen(false); }}>
         <section className="settings-panel" role="dialog" aria-modal="true" aria-labelledby="settings-title">
           <div className="settings-heading"><div><p className="eyebrow">TAWNY / SETTINGS</p><h2 id="settings-title">Connect your providers</h2><p>Keys are encrypted with Windows secure storage and never written to logs.</p></div><button className="close-button" onClick={() => setSettingsOpen(false)} aria-label="Close settings"><X size={17} /></button></div>
