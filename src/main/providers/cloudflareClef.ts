@@ -66,7 +66,7 @@ async function runCloudflareTextModel(
       {
         method: 'POST',
         headers: {
-          Authorization: `******
+          Authorization: ['Bearer', apiToken].join(' '),
           'Content-Type': 'application/json'
         },
         body: JSON.stringify(body),
