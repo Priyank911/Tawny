@@ -5,11 +5,12 @@ import { createActor } from 'xstate';
 import { pipelineMachine } from './pipeline/machine';
 import { gateTranscript } from './pipeline/gate';
 import { isImageGenerationRequest } from './pipeline/intent';
-import { pasteImage, pasteText } from './inject';
+import { captureSelectedText, pasteImage, pasteText } from './inject';
 import type { OverlaySnapshot } from '../shared/contracts';
 import { readProviderSettings, saveProviderSettings } from './settings';
 import { generateWithCloudflareFlux } from './providers/cloudflareFlux';
 import { transcribeWithGroq } from './providers/groqWhisper';
+import { rewriteWithCloudflareClef } from './providers/cloudflareClef';
 import { getRecentLogs, logPipeline, setLogSink } from './logger';
 import { startKeyWatcher, watchKeyRelease, cancelKeyReleaseWatch, makeWindowTopmost, stopKeyWatcher } from './keywatcherService';
 
@@ -322,12 +323,13 @@ ipcMain.handle('audio:transcribe', async (_event, audio: Uint8Array) => {
 
     actor.send({ type: 'STAGE', stage: 'deciding' });
 
+    const routedCommand = (gate.routed && gate.text ? gate.text : transcript).trim();
     // Check if this is an image generation request
-    const isImage = isImageGenerationRequest(gate.routed ? gate.text : transcript)
+    const isImage = isImageGenerationRequest(routedCommand)
       || isImageGenerationRequest(transcript);
 
     if (isImage) {
-      const promptText = gate.routed && gate.text ? gate.text : transcript;
+      const promptText = routedCommand || transcript;
       logPipeline({ event: 'decision.result', message: 'Image intent detected.', jobId: activeJobId, stage: 'decide', data: { intent: 'image_generate', prompt: promptText } });
       actor.send({ type: 'STAGE', stage: 'handling' });
       const image = await generateWithCloudflareFlux(settings.cloudflareAccountId, settings.cloudflareApiToken, { prompt: promptText });
@@ -341,6 +343,58 @@ ipcMain.handle('audio:transcribe', async (_event, audio: Uint8Array) => {
       mainWindow?.webContents.send('overlay:update', snapshot);
       actor.send({ type: 'SUCCESS', message: 'Image ready.' });
       return transcript;
+    }
+
+    let selectedText = '';
+    try {
+      selectedText = await captureSelectedText();
+      logPipeline({
+        event: 'selection.capture',
+        message: selectedText ? 'Selected text captured from the focused app.' : 'No active text selection was detected.',
+        jobId: activeJobId,
+        stage: 'decide',
+        data: { selectedLength: String(selectedText.length) }
+      });
+    } catch (error) {
+      logPipeline({
+        level: 'warn',
+        event: 'selection.capture.failure',
+        message: error instanceof Error ? error.message : 'Selected text capture failed; continuing with dictation.',
+        jobId: activeJobId,
+        stage: 'decide'
+      });
+    }
+
+    if (selectedText) {
+      const commandText = routedCommand || transcript;
+      logPipeline({
+        event: 'decision.result',
+        message: 'Selected text detected; routing to Cloudflare CLEF rewrite.',
+        jobId: activeJobId,
+        stage: 'decide',
+        data: { intent: 'text_rewrite', commandLength: String(commandText.length) }
+      });
+      actor.send({ type: 'STAGE', stage: 'handling' });
+      const rewrite = await rewriteWithCloudflareClef(
+        settings.cloudflareAccountId,
+        settings.cloudflareApiToken,
+        { selectedText, command: commandText }
+      );
+      logPipeline({
+        event: 'provider.success',
+        message: 'Cloudflare CLEF rewrite completed.',
+        jobId: activeJobId,
+        stage: 'handle',
+        provider: 'cloudflare-clef',
+        data: { model: rewrite.model, tier: rewrite.tier, mode: rewrite.mode }
+      });
+      actor.send({ type: 'STAGE', stage: 'injecting' });
+      await pasteText(rewrite.text);
+      logPipeline({ event: 'inject.success', message: 'Rewritten text pasted into the previously focused application.', jobId: activeJobId, stage: 'inject' });
+      snapshot = { ...snapshot, message: rewrite.text };
+      mainWindow?.webContents.send('overlay:update', snapshot);
+      actor.send({ type: 'SUCCESS', message: 'Rewrite complete.' });
+      return rewrite.text;
     }
 
     // Normal sentence / dictation input: paste text directly at cursor pointer
