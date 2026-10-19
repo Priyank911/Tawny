@@ -1,6 +1,6 @@
 import { PipelineError } from '../../shared/contracts';
 
-export const CLOUDFLARE_CLEF_DECIDER_MODEL = '@cf/meta/llama-3.1-8b-instruct';
+export const CLOUDFLARE_CLEF_DECIDER_MODEL = '@cf/cloudflare/clef';
 export const CLOUDFLARE_CLEF_LOW_MODEL = '@cf/meta/llama-3.1-8b-instruct';
 export const CLOUDFLARE_CLEF_BALANCED_MODEL = '@cf/meta/llama-3.1-70b-instruct-fp8';
 
