@@ -2,9 +2,29 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   CLOUDFLARE_CLEF_DECIDER_MODEL,
   CLOUDFLARE_CLEF_LOW_MODEL,
+  cleanRewrittenText,
+  decideWithCloudflareClef,
+  generateResponseWithCloudflareClef,
   parseClefDecision,
   rewriteWithCloudflareClef
 } from '../src/main/providers/cloudflareClef';
+
+describe('cleanRewrittenText', () => {
+  it('strips Rewritten text: preamble, hallucinated python code, and backtick spam', () => {
+    const raw = `Rewritten text:
+What are you doing? Can you tell me what your actual plan is for tomorrow?  \`\`\`python
+import re
+def rewrite_text(text): pass
+\`\`\` \`\`\` \`\`\` \`\`\``;
+
+    const cleaned = cleanRewrittenText(raw);
+    expect(cleaned).toBe('What are you doing? Can you tell me what your actual plan is for tomorrow?');
+  });
+
+  it('strips surrounding quotes', () => {
+    expect(cleanRewrittenText('"Please let me know your plan for tomorrow."')).toBe('Please let me know your plan for tomorrow.');
+  });
+});
 
 describe('parseClefDecision', () => {
   it('reads structured JSON decisions', () => {
@@ -13,6 +33,61 @@ describe('parseClefDecision', () => {
 
   it('falls back to low rewrite on invalid content', () => {
     expect(parseClefDecision('not-json')).toEqual({ tier: 'low', mode: 'rewrite' });
+  });
+});
+
+describe('decideWithCloudflareClef', () => {
+  it('identifies image generation requests', async () => {
+    const fetchMock = vi.fn().mockResolvedValueOnce(
+      new Response(JSON.stringify({ result: { response: '{"intent":"image_generate","tier":"low","confidence":0.95}' }, success: true }), { status: 200 })
+    );
+    vi.stubGlobal('fetch', fetchMock);
+
+    const decision = await decideWithCloudflareClef('acc', 'tok', { command: 'generate a cat image' });
+    expect(decision.intent).toBe('image_generate');
+    vi.unstubAllGlobals();
+  });
+
+  it('identifies text query requests like code generation', async () => {
+    const fetchMock = vi.fn().mockResolvedValueOnce(
+      new Response(JSON.stringify({ result: { response: '{"intent":"text_query","tier":"low","confidence":0.9}' }, success: true }), { status: 200 })
+    );
+    vi.stubGlobal('fetch', fetchMock);
+
+    const decision = await decideWithCloudflareClef('acc', 'tok', { command: 'give me python code for calculator' });
+    expect(decision.intent).toBe('text_query');
+    expect(decision.tier).toBe('low');
+    vi.unstubAllGlobals();
+  });
+
+  it('falls back to provided fallbackIntent if network fails', async () => {
+    const fetchMock = vi.fn().mockRejectedValueOnce(new Error('Network offline'));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const decision = await decideWithCloudflareClef('acc', 'tok', { command: 'hello friend' }, 'plain_dictation');
+    expect(decision.intent).toBe('plain_dictation');
+    vi.unstubAllGlobals();
+  });
+});
+
+describe('generateResponseWithCloudflareClef', () => {
+  it('calls low-grade model for minimal neuron usage and returns answer', async () => {
+    const fetchMock = vi.fn().mockResolvedValueOnce(
+      new Response(JSON.stringify({ result: { response: 'def add(a, b): return a + b' }, success: true }), { status: 200 })
+    );
+    vi.stubGlobal('fetch', fetchMock);
+
+    const response = await generateResponseWithCloudflareClef('acc', 'tok', {
+      command: 'give me python code for calculator',
+      tier: 'low'
+    });
+
+    expect(response).toBe('def add(a, b): return a + b');
+    expect(fetchMock).toHaveBeenCalledWith(
+      `https://api.cloudflare.com/client/v4/accounts/acc/ai/run/${CLOUDFLARE_CLEF_LOW_MODEL}`,
+      expect.objectContaining({ method: 'POST' })
+    );
+    vi.unstubAllGlobals();
   });
 });
 

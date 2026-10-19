@@ -51,7 +51,8 @@ export const overlaySnapshotSchema = z.object({
   rms: z.number().min(0).max(1).default(0),
   message: z.string().optional(),
   imageDataUrl: z.string().optional(),
-  target: targetWindowSchema.optional()
+  target: targetWindowSchema.optional(),
+  intent: z.enum(['image_generate', 'text_rewrite', 'text_query', 'plain_dictation']).optional()
 });
 export type OverlaySnapshot = z.infer<typeof overlaySnapshotSchema>;
 

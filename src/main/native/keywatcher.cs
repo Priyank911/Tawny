@@ -21,12 +21,13 @@ class KeyWatcher {
         while ((line = Console.ReadLine()) != null) {
             line = line.Trim();
             if (line == "watch") {
-                // Wait 100ms for initial key combination to settle
-                Thread.Sleep(100);
+                // Settle delay after initial hotkey trigger
+                Thread.Sleep(80);
 
-                // Sample the key states over the next 240ms to determine if the user is holding the shortcut
-                int heldCount = 0;
-                for (int i = 0; i < 15; i++) {
+                // Sample keys over ~500ms to determine if the user is holding down (push-to-talk)
+                // or just tapped the shortcut to speak hands-free.
+                bool isHold = true;
+                for (int i = 0; i < 25; i++) {
                     short sp = GetAsyncKeyState(0x20);   // VK_SPACE
                     short ctrl = GetAsyncKeyState(0x11); // VK_CONTROL
                     short alt = GetAsyncKeyState(0x12);  // VK_MENU
@@ -35,16 +36,19 @@ class KeyWatcher {
                     bool ctrlDown = (ctrl & 0x8000) != 0;
                     bool altDown = (alt & 0x8000) != 0;
 
-                    // If user is holding Space OR holding modifiers
-                    if (spDown || (ctrlDown && altDown)) {
-                        heldCount++;
+                    bool keysHeld = spDown || (ctrlDown && altDown);
+                    if (!keysHeld) {
+                        // User released keys within 500ms: this was a tap, NOT a push-to-talk hold!
+                        // In tap mode, stay listening hands-free. Do not send release.
+                        isHold = false;
+                        break;
                     }
-                    Thread.Sleep(16);
+                    Thread.Sleep(20);
                 }
 
-                // If user held keys during the sample window, they are holding to talk
-                if (heldCount >= 6) {
-                    // Loop continuously while the user speaks; release when they leave the keys
+                if (isHold) {
+                    // Push-to-talk: User is holding the keys down while speaking.
+                    // Wait until they actually release the keys.
                     int releaseCount = 0;
                     while (true) {
                         short sp = GetAsyncKeyState(0x20);
@@ -55,24 +59,23 @@ class KeyWatcher {
                         bool ctrlDown = (ctrl & 0x8000) != 0;
                         bool altDown = (alt & 0x8000) != 0;
 
-                        // Key is released when Space is not pressed AND at least one modifier is released,
-                        // or when all keys are released
-                        bool isReleased = (!spDown && (!ctrlDown || !altDown));
+                        bool keysHeld = spDown || (ctrlDown && altDown);
 
-                        if (isReleased) {
+                        if (!keysHeld) {
                             releaseCount++;
-                            // Debounce: require 3 consecutive samples (~45ms) of released state
-                            if (releaseCount >= 3) {
+                            // Debounce: require 4 consecutive samples (~80ms) of release
+                            if (releaseCount >= 4) {
                                 Console.WriteLine("released");
                                 break;
                             }
                         } else {
                             releaseCount = 0;
                         }
-                        Thread.Sleep(15);
+                        Thread.Sleep(20);
                     }
                 } else {
-                    // Quick tap - user tapped to start recording; do not send release, let user speak freely
+                    // Tap mode: user tapped to start recording.
+                    // Keep listening hands-free. The user will press shortcut again or click to stop.
                 }
             } else if (line.StartsWith("topmost ")) {
                 string hwndStr = line.Substring(8).Trim();

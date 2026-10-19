@@ -1,6 +1,6 @@
 import { StrictMode, useEffect, useMemo, useRef, useState, type ReactElement } from 'react';
 import { createRoot } from 'react-dom/client';
-import { ChevronRight, Image as ImageIcon, LoaderCircle, Sparkles, ScrollText, Settings2, X, Keyboard, ShieldCheck } from 'lucide-react';
+import { ChevronRight, Image as ImageIcon, LoaderCircle, Sparkles, ScrollText, Settings2, X, Keyboard, ShieldCheck, Code as CodeIcon, FileText as FileTextIcon } from 'lucide-react';
 import type { OverlaySnapshot, PipelineLog, ProviderSettings } from '../shared/contracts';
 import './styles.css';
 
@@ -98,21 +98,52 @@ function App(): ReactElement {
     recorder.stop();
     return undefined;
   }, [state]);
-  const label = useMemo(() => ({
-    idle: ['Ready', 'Ctrl + Alt + Space'],
-    arming: ['Listening', 'Speak now'],
-    recording: ['Listening', 'Release to send'],
-    finalizing: ['Finishing', 'Saving audio'],
-    transcribing: ['Transcribing', 'Groq Whisper'],
-    gating: ['Routing', 'Evaluating wake phrase'],
-    deciding: ['Routing', 'Understanding request'],
-    confirming: ['Generate image?', 'Press Enter to confirm'],
-    handling: ['Generating image', 'Cloudflare Flux'],
-    injecting: ['Pasting', 'Returning to your app'],
-    done: [snapshot.imageDataUrl ? 'Image ready' : 'Dictation ready', snapshot.imageDataUrl ? 'Preview generated locally' : 'Pasted at cursor'],
-    failed: ['Something went wrong', snapshot.message ?? 'Retry with hotkey'],
-    cancelled: ['Cancelled', 'Nothing was sent']
-  } as Record<string, [string, string]>)[state] ?? ['Tawny', ''], [state, snapshot.message, snapshot.imageDataUrl]);
+  const label = useMemo(() => {
+    const isImage = snapshot.intent === 'image_generate' || !!snapshot.imageDataUrl;
+    const isCodeOrQuery = snapshot.intent === 'text_query';
+    const isRewrite = snapshot.intent === 'text_rewrite';
+
+    const handlingTitle = isImage
+      ? 'Generating image'
+      : isCodeOrQuery
+      ? 'Writing code'
+      : isRewrite
+      ? 'Rewriting text'
+      : 'Generating response';
+
+    const handlingSubtitle = isImage
+      ? 'Cloudflare Flux'
+      : isCodeOrQuery
+      ? 'Cloudflare Llama'
+      : isRewrite
+      ? 'Cloudflare CLEF'
+      : 'Cloudflare AI';
+
+    const doneTitle = isImage
+      ? 'Image ready'
+      : isCodeOrQuery
+      ? 'Code ready'
+      : isRewrite
+      ? 'Rewrite ready'
+      : 'Dictation ready';
+
+    const map: Record<string, [string, string]> = {
+      idle: ['Ready', 'Ctrl + Alt + Space'],
+      arming: ['Listening', 'Speak now'],
+      recording: ['Listening', 'Release to send'],
+      finalizing: ['Finishing', 'Saving audio'],
+      transcribing: ['Transcribing', 'Groq Whisper'],
+      gating: ['Routing', 'Evaluating wake phrase'],
+      deciding: ['Routing', 'Understanding request'],
+      confirming: ['Generate image?', 'Press Enter to confirm'],
+      handling: [handlingTitle, handlingSubtitle],
+      injecting: ['Pasting', 'Returning to your app'],
+      done: [doneTitle, isImage ? 'Preview generated locally' : 'Pasted at cursor'],
+      failed: ['Something went wrong', snapshot.message ?? 'Retry with hotkey'],
+      cancelled: ['Cancelled', 'Nothing was sent']
+    };
+    return map[state] ?? ['Tawny', ''];
+  }, [state, snapshot.intent, snapshot.message, snapshot.imageDataUrl]);
 
   const isListening = state === 'recording' || state === 'arming';
   const isBusy = ['transcribing', 'gating', 'deciding', 'handling', 'injecting', 'finalizing'].includes(state);
@@ -217,7 +248,13 @@ function App(): ReactElement {
                 <img className="pill-preview-image" src={snapshot.imageDataUrl} alt="Preview" />
               ) : (
                 <div className="pill-preview-placeholder">
-                  <ImageIcon size={16} strokeWidth={1.75} />
+                  {snapshot.intent === 'text_query' ? (
+                    <CodeIcon size={16} strokeWidth={1.75} />
+                  ) : snapshot.intent === 'text_rewrite' ? (
+                    <FileTextIcon size={16} strokeWidth={1.75} />
+                  ) : (
+                    <ImageIcon size={16} strokeWidth={1.75} />
+                  )}
                 </div>
               )}
               {state === 'confirming' ? (

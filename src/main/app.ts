@@ -10,7 +10,12 @@ import type { OverlaySnapshot } from '../shared/contracts';
 import { readProviderSettings, saveProviderSettings } from './settings';
 import { generateWithCloudflareFlux } from './providers/cloudflareFlux';
 import { transcribeWithGroq } from './providers/groqWhisper';
-import { rewriteWithCloudflareClef } from './providers/cloudflareClef';
+import {
+  decideWithCloudflareClef,
+  generateResponseWithCloudflareClef,
+  rewriteWithCloudflareClef,
+  type ClefIntent
+} from './providers/cloudflareClef';
 import { getRecentLogs, logPipeline, setLogSink } from './logger';
 import { startKeyWatcher, watchKeyRelease, cancelKeyReleaseWatch, makeWindowTopmost, stopKeyWatcher } from './keywatcherService';
 
@@ -25,6 +30,7 @@ let activeJobId: string | undefined;
 let finalizingTimer: NodeJS.Timeout | undefined;
 let routingTimer: NodeJS.Timeout | undefined;
 let stopPending = false;
+let pendingSelectedTextPromise: Promise<string> | undefined;
 const hasSingleInstanceLock = app.requestSingleInstanceLock();
 
 if (!hasSingleInstanceLock) {
@@ -299,6 +305,12 @@ ipcMain.handle('image:generate', async (_event, prompt: unknown) => {
     throw error;
   }
 });
+
+function isQueryOrCodeRequest(text: string): boolean {
+  const norm = text.toLowerCase().trim();
+  return /\b(?:give me|can write|can you write|write|code|python|py|javascript|js|typescript|ts|function|script|calculator|increment|decrement|how to|what is|explain|create|generate|draft|compose)\b/i.test(norm);
+}
+
 ipcMain.handle('audio:transcribe', async (_event, audio: Uint8Array) => {
   const startedAt = Date.now();
   const settings = await readProviderSettings();
@@ -307,7 +319,15 @@ ipcMain.handle('audio:transcribe', async (_event, audio: Uint8Array) => {
   try {
     const transcript = await transcribeWithGroq(settings.groqApiKey, audio);
     if (!transcript) throw new Error('Groq returned an empty transcript.');
-    logPipeline({ event: 'provider.success', message: 'Groq Whisper returned a transcript.', jobId: activeJobId, stage: 'stt', provider: 'groq-whisper', durationMs: Date.now() - startedAt });
+    logPipeline({
+      event: 'provider.success',
+      message: `Groq Whisper returned transcript: "${transcript}"`,
+      jobId: activeJobId,
+      stage: 'stt',
+      provider: 'groq-whisper',
+      durationMs: Date.now() - startedAt,
+      data: { transcript }
+    });
     snapshot = { ...snapshot, message: `Heard: ${transcript}` };
     mainWindow?.webContents.send('overlay:update', snapshot);
 
@@ -324,30 +344,11 @@ ipcMain.handle('audio:transcribe', async (_event, audio: Uint8Array) => {
     actor.send({ type: 'STAGE', stage: 'deciding' });
 
     const routedCommand = (gate.routed && gate.text ? gate.text : transcript).trim();
-    // Check if this is an image generation request
-    const isImage = isImageGenerationRequest(routedCommand)
-      || isImageGenerationRequest(transcript);
 
-    if (isImage) {
-      const promptText = routedCommand || transcript;
-      logPipeline({ event: 'decision.result', message: 'Image intent detected.', jobId: activeJobId, stage: 'decide', data: { intent: 'image_generate', prompt: promptText } });
-      actor.send({ type: 'STAGE', stage: 'handling' });
-      const image = await generateWithCloudflareFlux(settings.cloudflareAccountId, settings.cloudflareApiToken, { prompt: promptText });
-      const outputPath = join(app.getPath('userData'), `tawny-image-${Date.now()}.jpg`);
-      await writeFile(outputPath, Buffer.from(image.base64, 'base64'));
-      logPipeline({ event: 'image.saved', message: 'Cloudflare Flux image saved locally.', jobId: activeJobId, stage: 'handle', provider: 'cloudflare-flux', data: { path: outputPath } });
-      actor.send({ type: 'STAGE', stage: 'injecting' });
-      await pasteImage(image.base64);
-      logPipeline({ event: 'image.inject.success', message: 'Generated image copied to the clipboard and pasted into the previously focused application.', jobId: activeJobId, stage: 'inject' });
-      snapshot = { ...snapshot, imageDataUrl: `data:${image.mimeType};base64,${image.base64}`, message: 'Image ready.' };
-      mainWindow?.webContents.send('overlay:update', snapshot);
-      actor.send({ type: 'SUCCESS', message: 'Image ready.' });
-      return transcript;
-    }
-
+    // 1. Retrieve selected text captured when hotkey was first pressed
     let selectedText = '';
     try {
-      selectedText = await captureSelectedText();
+      selectedText = (await pendingSelectedTextPromise) || '';
       logPipeline({
         event: 'selection.capture',
         message: selectedText ? 'Selected text captured from the focused app.' : 'No active text selection was detected.',
@@ -365,20 +366,58 @@ ipcMain.handle('audio:transcribe', async (_event, audio: Uint8Array) => {
       });
     }
 
-    if (selectedText) {
+    // 2. Compute baseline heuristic fallback
+    const isImageHeuristic = isImageGenerationRequest(routedCommand) || isImageGenerationRequest(transcript);
+    const isCodeOrQueryHeuristic = !isImageHeuristic && !selectedText && isQueryOrCodeRequest(routedCommand);
+    let fallbackIntent: ClefIntent = 'plain_dictation';
+    if (isImageHeuristic) fallbackIntent = 'image_generate';
+    else if (selectedText) fallbackIntent = 'text_rewrite';
+    else if (isCodeOrQueryHeuristic) fallbackIntent = 'text_query';
+
+    // 3. Use Cloudflare CLEF as decider model for intelligent routing
+    const clefDecision = await decideWithCloudflareClef(
+      settings.cloudflareAccountId,
+      settings.cloudflareApiToken,
+      { command: routedCommand, selectedText },
+      fallbackIntent
+    );
+
+    logPipeline({
+      event: 'decision.result',
+      message: `CLEF decided intent: ${clefDecision.intent} (${clefDecision.tier} tier)`,
+      jobId: activeJobId,
+      stage: 'decide',
+      data: { intent: clefDecision.intent, tier: clefDecision.tier, confidence: String(clefDecision.confidence) }
+    });
+
+    snapshot = { ...snapshot, intent: clefDecision.intent };
+    mainWindow?.webContents.send('overlay:update', snapshot);
+
+    // Path A: Image generation
+    if (clefDecision.intent === 'image_generate') {
+      const promptText = routedCommand || transcript;
+      actor.send({ type: 'STAGE', stage: 'handling' });
+      const image = await generateWithCloudflareFlux(settings.cloudflareAccountId, settings.cloudflareApiToken, { prompt: promptText });
+      const outputPath = join(app.getPath('userData'), `tawny-image-${Date.now()}.jpg`);
+      await writeFile(outputPath, Buffer.from(image.base64, 'base64'));
+      logPipeline({ event: 'image.saved', message: 'Cloudflare Flux image saved locally.', jobId: activeJobId, stage: 'handle', provider: 'cloudflare-flux', data: { path: outputPath } });
+      actor.send({ type: 'STAGE', stage: 'injecting' });
+      await pasteImage(image.base64);
+      logPipeline({ event: 'image.inject.success', message: 'Generated image copied to the clipboard and pasted into the previously focused application.', jobId: activeJobId, stage: 'inject' });
+      snapshot = { ...snapshot, imageDataUrl: `data:${image.mimeType};base64,${image.base64.trim()}`, message: 'Image ready.' };
+      mainWindow?.webContents.send('overlay:update', snapshot);
+      actor.send({ type: 'SUCCESS', message: 'Image ready.' });
+      return transcript;
+    }
+
+    // Path B: Text rewrite on selected text
+    if (clefDecision.intent === 'text_rewrite' && selectedText) {
       const commandText = routedCommand || transcript;
-      logPipeline({
-        event: 'decision.result',
-        message: 'Selected text detected; routing to Cloudflare CLEF rewrite.',
-        jobId: activeJobId,
-        stage: 'decide',
-        data: { intent: 'text_rewrite', commandLength: String(commandText.length) }
-      });
       actor.send({ type: 'STAGE', stage: 'handling' });
       const rewrite = await rewriteWithCloudflareClef(
         settings.cloudflareAccountId,
         settings.cloudflareApiToken,
-        { selectedText, command: commandText }
+        { selectedText, command: commandText, tier: clefDecision.tier }
       );
       logPipeline({
         event: 'provider.success',
@@ -397,7 +436,33 @@ ipcMain.handle('audio:transcribe', async (_event, audio: Uint8Array) => {
       return rewrite.text;
     }
 
-    // Normal sentence / dictation input: paste text directly at cursor pointer
+    // Path C: Text query / code generation (e.g. "give me python code for making calculator")
+    if (clefDecision.intent === 'text_query') {
+      const commandText = routedCommand || transcript;
+      actor.send({ type: 'STAGE', stage: 'handling' });
+      const responseText = await generateResponseWithCloudflareClef(
+        settings.cloudflareAccountId,
+        settings.cloudflareApiToken,
+        { command: commandText, context: selectedText, tier: clefDecision.tier }
+      );
+      logPipeline({
+        event: 'provider.success',
+        message: 'Cloudflare CLEF assistant response completed.',
+        jobId: activeJobId,
+        stage: 'handle',
+        provider: 'cloudflare-clef',
+        data: { tier: clefDecision.tier }
+      });
+      actor.send({ type: 'STAGE', stage: 'injecting' });
+      await pasteText(responseText);
+      logPipeline({ event: 'inject.success', message: 'Assistant response pasted into the previously focused application.', jobId: activeJobId, stage: 'inject' });
+      snapshot = { ...snapshot, message: responseText };
+      mainWindow?.webContents.send('overlay:update', snapshot);
+      actor.send({ type: 'SUCCESS', message: 'Response ready.' });
+      return responseText;
+    }
+
+    // Path D: Normal sentence / dictation input: paste text directly at cursor pointer
     logPipeline({ event: 'decision.result', message: 'Dictation intent detected; pasting text at cursor.', jobId: activeJobId, stage: 'decide', data: { intent: 'plain_text' } });
     actor.send({ type: 'STAGE', stage: 'injecting' });
     await pasteText(transcript);
@@ -426,20 +491,34 @@ app.whenReady().then(() => {
   mainWindow?.webContents.on('context-menu', () => showContextMenu());
   createTray();
   const shortcut = 'Ctrl+Alt+Space';
+  let lastHotkeyTimestamp = 0;
   const registered = globalShortcut.register(shortcut, () => {
     if (!mainWindow) return;
+    const now = Date.now();
+    // Ignore OS auto-repeat keystrokes that fire repeatedly while hotkey is held
+    if (now - lastHotkeyTimestamp < 400) {
+      return;
+    }
+    lastHotkeyTimestamp = now;
+
     if (snapshot.state === 'idle' || snapshot.state === 'done' || snapshot.state === 'failed' || snapshot.state === 'cancelled') {
       stopPending = false;
       activeJobId = `job-${Date.now().toString(36)}`;
-      snapshot = { ...snapshot, imageDataUrl: undefined, message: undefined };
-      logPipeline({ event: 'hotkey.start', message: 'Global shortcut received; starting push-to-talk capture.', jobId: activeJobId, stage: 'capture' });
+      snapshot = { ...snapshot, imageDataUrl: undefined, message: undefined, intent: undefined };
+      // Probe active selected text immediately while focused window is active:
+      pendingSelectedTextPromise = captureSelectedText().catch(() => '');
+      logPipeline({ event: 'hotkey.start', message: 'Global shortcut received; starting audio capture.', jobId: activeJobId, stage: 'capture' });
       showOverlay();
       actor.send({ type: 'HOTKEY' });
 
-      // Instant release detection: when user releases the hotkey, audio finalizes and sends automatically
+      // Hold-to-talk release detection: only triggers if held for > 600ms and then released
+      const captureStartTime = Date.now();
       watchKeyRelease(() => {
-        logPipeline({ event: 'hotkey.release', message: 'Shortcut released; finalizing capture.', jobId: activeJobId, stage: 'capture' });
-        stopRecording();
+        // Enforce that release only finalizes if user actually held for at least 600ms
+        if (Date.now() - captureStartTime >= 600) {
+          logPipeline({ event: 'hotkey.release', message: 'Shortcut released; finalizing capture.', jobId: activeJobId, stage: 'capture' });
+          stopRecording();
+        }
       });
 
       readyTimer = setTimeout(() => {

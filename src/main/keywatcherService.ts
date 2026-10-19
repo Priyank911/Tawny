@@ -75,14 +75,12 @@ export function watchKeyRelease(onReleased: () => void): void {
     startKeyWatcher();
   }
   if (watcherProcess && !watcherProcess.killed) {
-    watcherProcess.stdin.write('watch\n');
-  } else {
-    // Fallback: in case binary couldn't run, poll via timeout
-    setTimeout(() => {
-      const cb = releaseCallback;
-      releaseCallback = undefined;
-      cb?.();
-    }, 1500);
+    try {
+      watcherProcess.stdin.write('watch\n');
+    } catch {
+      // Process pipe broken
+      startKeyWatcher();
+    }
   }
 }
 
