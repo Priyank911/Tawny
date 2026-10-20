@@ -42,12 +42,16 @@ export async function captureSelectedText(maxLength = 8_000): Promise<string> {
   const marker = `__tawny_copy_probe_${Date.now().toString(36)}_${Math.random().toString(36).slice(2)}__`;
   try {
     clipboard.writeText(marker);
-    await runPowerShell(
-      '$wshell = New-Object -ComObject WScript.Shell; Start-Sleep -Milliseconds 70; $wshell.SendKeys("^c"); Start-Sleep -Milliseconds 130'
-    );
-    const copied = clipboard.readText().trim();
-    if (!copied || copied === marker) return '';
-    return copied.slice(0, Math.max(1, maxLength));
+    // The global shortcut may arrive while Ctrl/Alt/Space are still held.
+    // Retry once for slower editors and browser-based text fields.
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      await runPowerShell(
+        '$wshell = New-Object -ComObject WScript.Shell; Start-Sleep -Milliseconds 110; $wshell.SendKeys("^c"); Start-Sleep -Milliseconds 180'
+      );
+      const copied = clipboard.readText().trim();
+      if (copied && copied !== marker) return copied.slice(0, Math.max(1, maxLength));
+    }
+    return '';
   } finally {
     restoreClipboard(before);
   }

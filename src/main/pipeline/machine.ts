@@ -25,8 +25,20 @@ export const pipelineMachine = createMachine({
   context: { state: 'idle', rms: 0, elapsedMs: 0 },
   states: {
     idle: { on: { HOTKEY: 'arming' } },
-    arming: { on: { AUDIO_READY: 'recording', CANCEL: 'cancelled' } },
-    recording: { on: { STOP: 'finalizing', CANCEL: 'cancelled' } },
+    arming: {
+      on: {
+        AUDIO_READY: 'recording',
+        CANCEL: 'cancelled',
+        FAIL: { target: 'failed', actions: assign({ message: ({ event }) => event.message }) }
+      }
+    },
+    recording: {
+      on: {
+        STOP: 'finalizing',
+        CANCEL: 'cancelled',
+        FAIL: { target: 'failed', actions: assign({ message: ({ event }) => event.message }) }
+      }
+    },
     finalizing: {
       on: {
         STAGE: [
@@ -77,8 +89,21 @@ export const pipelineMachine = createMachine({
       }
     },
     confirming: { on: { CONFIRM: 'handling', HOTKEY: 'handling', CANCEL: 'cancelled' } },
-    handling: { on: { STAGE: { target: 'injecting' }, SUCCESS: 'done', FAIL: 'failed', CANCEL: 'cancelled' } },
-    injecting: { on: { SUCCESS: 'done', FAIL: 'failed', CANCEL: 'cancelled' } },
+    handling: {
+      on: {
+        STAGE: { target: 'injecting' },
+        SUCCESS: 'done',
+        FAIL: { target: 'failed', actions: assign({ message: ({ event }) => event.message }) },
+        CANCEL: 'cancelled'
+      }
+    },
+    injecting: {
+      on: {
+        SUCCESS: 'done',
+        FAIL: { target: 'failed', actions: assign({ message: ({ event }) => event.message }) },
+        CANCEL: 'cancelled'
+      }
+    },
     done: { after: { 5000: 'idle' }, on: { HOTKEY: 'arming' } },
     failed: { after: { 6000: 'idle' }, on: { HOTKEY: 'arming' } },
     cancelled: { after: { 250: 'idle' } }

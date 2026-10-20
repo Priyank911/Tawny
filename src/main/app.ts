@@ -4,9 +4,9 @@ import { writeFile } from 'node:fs/promises';
 import { createActor } from 'xstate';
 import { pipelineMachine } from './pipeline/machine';
 import { gateTranscript } from './pipeline/gate';
-import { isImageGenerationRequest } from './pipeline/intent';
+import { isExplicitTextQueryRequest, isImageGenerationRequest, isTextRewriteRequest } from './pipeline/intent';
 import { captureSelectedText, pasteImage, pasteText } from './inject';
-import type { OverlaySnapshot } from '../shared/contracts';
+import { PipelineError, type OverlaySnapshot } from '../shared/contracts';
 import { readProviderSettings, saveProviderSettings } from './settings';
 import { generateWithCloudflareFlux } from './providers/cloudflareFlux';
 import { transcribeWithGroq } from './providers/groqWhisper';
@@ -306,11 +306,6 @@ ipcMain.handle('image:generate', async (_event, prompt: unknown) => {
   }
 });
 
-function isQueryOrCodeRequest(text: string): boolean {
-  const norm = text.toLowerCase().trim();
-  return /\b(?:give me|can write|can you write|write|code|python|py|javascript|js|typescript|ts|function|script|calculator|increment|decrement|how to|what is|explain|create|generate|draft|compose)\b/i.test(norm);
-}
-
 ipcMain.handle('audio:transcribe', async (_event, audio: Uint8Array) => {
   const startedAt = Date.now();
   const settings = await readProviderSettings();
@@ -321,12 +316,12 @@ ipcMain.handle('audio:transcribe', async (_event, audio: Uint8Array) => {
     if (!transcript) throw new Error('Groq returned an empty transcript.');
     logPipeline({
       event: 'provider.success',
-      message: `Groq Whisper returned transcript: "${transcript}"`,
+      message: 'Groq Whisper returned a transcript.',
       jobId: activeJobId,
       stage: 'stt',
       provider: 'groq-whisper',
       durationMs: Date.now() - startedAt,
-      data: { transcript }
+      data: { characters: String(transcript.length) }
     });
     snapshot = { ...snapshot, message: `Heard: ${transcript}` };
     mainWindow?.webContents.send('overlay:update', snapshot);
@@ -368,33 +363,56 @@ ipcMain.handle('audio:transcribe', async (_event, audio: Uint8Array) => {
 
     // 2. Compute baseline heuristic fallback
     const isImageHeuristic = isImageGenerationRequest(routedCommand) || isImageGenerationRequest(transcript);
-    const isCodeOrQueryHeuristic = !isImageHeuristic && !selectedText && isQueryOrCodeRequest(routedCommand);
+    const isRewriteHeuristic = Boolean(selectedText) && isTextRewriteRequest(routedCommand);
+    const isCodeOrQueryHeuristic = !isImageHeuristic && !isRewriteHeuristic && isExplicitTextQueryRequest(routedCommand);
     let fallbackIntent: ClefIntent = 'plain_dictation';
     if (isImageHeuristic) fallbackIntent = 'image_generate';
-    else if (selectedText) fallbackIntent = 'text_rewrite';
+    else if (isRewriteHeuristic) fallbackIntent = 'text_rewrite';
     else if (isCodeOrQueryHeuristic) fallbackIntent = 'text_query';
 
-    // 3. Use Cloudflare CLEF as decider model for intelligent routing
-    const clefDecision = await decideWithCloudflareClef(
-      settings.cloudflareAccountId,
-      settings.cloudflareApiToken,
-      { command: routedCommand, selectedText },
-      fallbackIntent
-    );
+    // 3. Use Cloudflare CLEF only when the command explicitly needs a model.
+    // Plain dictation must stay local after Whisper transcription so a normal
+    // sentence can never turn into an assistant-generated response.
+    const shouldUseClef = isImageHeuristic || isRewriteHeuristic || isCodeOrQueryHeuristic;
+    const clefDecision = shouldUseClef
+      ? await decideWithCloudflareClef(
+          settings.cloudflareAccountId,
+          settings.cloudflareApiToken,
+          { command: routedCommand, selectedText },
+          fallbackIntent
+        )
+      : { intent: 'plain_dictation' as const, tier: 'low' as const, confidence: 1 };
+
+    // CLEF is the primary decider. Deterministic lexical guardrails protect
+    // explicit image requests and edits of selected text when a response is
+    // ambiguous or the decider is temporarily unavailable.
+    let resolvedIntent = clefDecision.intent;
+    if (isImageHeuristic) resolvedIntent = 'image_generate';
+    else if (isRewriteHeuristic) resolvedIntent = 'text_rewrite';
+    else if (isCodeOrQueryHeuristic) resolvedIntent = 'text_query';
+    else resolvedIntent = 'plain_dictation';
 
     logPipeline({
       event: 'decision.result',
-      message: `CLEF decided intent: ${clefDecision.intent} (${clefDecision.tier} tier)`,
+      message: shouldUseClef
+        ? `CLEF decided intent: ${resolvedIntent} (${clefDecision.tier} tier)`
+        : 'Plain dictation detected; no model response requested.',
       jobId: activeJobId,
       stage: 'decide',
-      data: { intent: clefDecision.intent, tier: clefDecision.tier, confidence: String(clefDecision.confidence) }
+      data: {
+        intent: resolvedIntent,
+        clefIntent: clefDecision.intent,
+        tier: clefDecision.tier,
+        confidence: String(clefDecision.confidence),
+        modelRouting: String(shouldUseClef)
+      }
     });
 
-    snapshot = { ...snapshot, intent: clefDecision.intent };
+    snapshot = { ...snapshot, intent: resolvedIntent };
     mainWindow?.webContents.send('overlay:update', snapshot);
 
     // Path A: Image generation
-    if (clefDecision.intent === 'image_generate') {
+    if (resolvedIntent === 'image_generate') {
       const promptText = routedCommand || transcript;
       actor.send({ type: 'STAGE', stage: 'handling' });
       const image = await generateWithCloudflareFlux(settings.cloudflareAccountId, settings.cloudflareApiToken, { prompt: promptText });
@@ -411,7 +429,7 @@ ipcMain.handle('audio:transcribe', async (_event, audio: Uint8Array) => {
     }
 
     // Path B: Text rewrite on selected text
-    if (clefDecision.intent === 'text_rewrite' && selectedText) {
+    if (resolvedIntent === 'text_rewrite' && selectedText) {
       const commandText = routedCommand || transcript;
       actor.send({ type: 'STAGE', stage: 'handling' });
       const rewrite = await rewriteWithCloudflareClef(
@@ -437,7 +455,7 @@ ipcMain.handle('audio:transcribe', async (_event, audio: Uint8Array) => {
     }
 
     // Path C: Text query / code generation (e.g. "give me python code for making calculator")
-    if (clefDecision.intent === 'text_query') {
+    if (resolvedIntent === 'text_query') {
       const commandText = routedCommand || transcript;
       actor.send({ type: 'STAGE', stage: 'handling' });
       const responseText = await generateResponseWithCloudflareClef(
@@ -473,7 +491,17 @@ ipcMain.handle('audio:transcribe', async (_event, audio: Uint8Array) => {
     return transcript;
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Groq transcription failed.';
-    logPipeline({ level: 'error', event: 'provider.failure', message, jobId: activeJobId, stage: 'stt', provider: 'groq-whisper', durationMs: Date.now() - startedAt, errorClass: 'permanent' });
+    const pipelineError = error instanceof PipelineError ? error : undefined;
+    logPipeline({
+      level: 'error',
+      event: 'pipeline.failure',
+      message,
+      jobId: activeJobId,
+      stage: pipelineError?.stage ?? 'stt',
+      ...(pipelineError?.stage === 'stt' ? { provider: 'groq-whisper' } : {}),
+      durationMs: Date.now() - startedAt,
+      errorClass: pipelineError?.cls ?? 'permanent'
+    });
     actor.send({ type: 'FAIL', message });
     throw error;
   }

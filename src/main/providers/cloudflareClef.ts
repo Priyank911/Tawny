@@ -1,12 +1,47 @@
 import { PipelineError } from '../../shared/contracts';
 
 export const CLOUDFLARE_CLEF_DECIDER_MODEL = '@cf/cloudflare/clef';
-export const CLOUDFLARE_CLEF_LOW_MODEL = '@cf/meta/llama-3.1-8b-instruct';
-export const CLOUDFLARE_CLEF_BALANCED_MODEL = '@cf/meta/llama-3.1-70b-instruct-fp8';
+// Keep these IDs aligned with the currently routable Workers AI catalog.
+// The older llama-3.1-8b-instruct and llama-3.1-70b-instruct-fp8 routes now
+// return 7000 ("No route for that URI") from the AI Gateway endpoint.
+export const CLOUDFLARE_CLEF_LOW_MODEL = '@cf/meta/llama-3.1-8b-instruct-fp8';
+export const CLOUDFLARE_CLEF_BALANCED_MODEL = '@cf/meta/llama-3.3-70b-instruct-fp8-fast';
 
 export type ClefTier = 'low' | 'balanced';
 export type ClefMode = 'rewrite' | 'respond';
 export type ClefIntent = 'image_generate' | 'text_rewrite' | 'text_query' | 'plain_dictation';
+
+const clefIntents: ClefIntent[] = ['image_generate', 'text_rewrite', 'text_query', 'plain_dictation'];
+
+function isClefIntent(value: unknown): value is ClefIntent {
+  return typeof value === 'string' && clefIntents.includes(value as ClefIntent);
+}
+
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === 'object' ? value as Record<string, unknown> : undefined;
+}
+
+function choiceValue(value: unknown): unknown {
+  const record = asRecord(value);
+  if (!record) return value;
+  if ('choice' in record) return record.choice;
+  if ('answer' in record) return record.answer;
+  if ('value' in record) return record.value;
+  if ('label' in record) return record.label;
+  const probabilities = asRecord(record.probabilities);
+  if (probabilities) {
+    return Object.entries(probabilities)
+      .filter((entry): entry is [string, number] => typeof entry[1] === 'number')
+      .sort((left, right) => right[1] - left[1])[0]?.[0];
+  }
+  return undefined;
+}
+
+function confidenceValue(value: unknown): number {
+  const record = asRecord(value);
+  const confidence = record?.confidence;
+  return typeof confidence === 'number' ? Math.max(0, Math.min(1, confidence)) : 0.9;
+}
 
 export interface ClefRewriteResult {
   text: string;
@@ -64,7 +99,31 @@ export function parseClefIntentDecision(body: unknown, fallbackIntent: ClefInten
     ? body.result
     : body) as Record<string, unknown>;
 
-  // Check if Clef returned structured choice probability distributions
+  // Official CLEF responses return answers under result.answers. A choice
+  // answer contains { choice, confidence, probabilities }.
+  const answers = asRecord(resultObj.answers);
+  const intentAnswer = answers?.intent;
+  const tierAnswer = answers?.tier;
+  const answeredIntent = choiceValue(intentAnswer);
+  if (isClefIntent(answeredIntent)) {
+    const answeredTier = choiceValue(tierAnswer);
+    return {
+      intent: answeredIntent,
+      tier: answeredTier === 'balanced' ? 'balanced' : 'low',
+      confidence: confidenceValue(intentAnswer)
+    };
+  }
+
+  // Check if Clef returned a direct structured decision.
+  if (isClefIntent(resultObj.intent)) {
+    return {
+      intent: resultObj.intent,
+      tier: resultObj.tier === 'balanced' ? 'balanced' : 'low',
+      confidence: typeof resultObj.confidence === 'number' ? Math.max(0, Math.min(1, resultObj.confidence)) : 0.9
+    };
+  }
+
+  // Check if Clef returned structured choice probability distributions.
   if (resultObj.intent && typeof resultObj.intent === 'object') {
     const intentScores = resultObj.intent as Record<string, number>;
     let topIntent: ClefIntent = fallbackIntent;
@@ -110,6 +169,19 @@ export function parseClefIntentDecision(body: unknown, fallbackIntent: ClefInten
   return { intent: fallbackIntent, tier: 'low', confidence: 0.7 };
 }
 
+function cloudflareErrorDetail(body: unknown): string {
+  const record = asRecord(body);
+  const errors = Array.isArray(record?.errors) ? record.errors : [];
+  const details = errors.map((entry) => {
+    const item = asRecord(entry);
+    if (!item) return '';
+    const code = typeof item.code === 'string' || typeof item.code === 'number' ? String(item.code) : '';
+    const message = typeof item.message === 'string' ? item.message : '';
+    return [code, message].filter(Boolean).join(': ');
+  }).filter(Boolean);
+  return details.join('; ').slice(0, 240);
+}
+
 async function runCloudflareModel(
   accountId: string,
   apiToken: string,
@@ -137,10 +209,11 @@ async function runCloudflareModel(
     );
     const result: unknown = await response.json().catch(() => undefined);
     if (!response.ok) {
+      const detail = cloudflareErrorDetail(result);
       throw new PipelineError(
         response.status === 429 || response.status >= 500 ? 'transient' : 'permanent',
         'handle',
-        `Cloudflare model request failed (${response.status}).`
+        `Cloudflare model request failed (${response.status})${detail ? `: ${detail}` : ''}.`
       );
     }
     return result;
@@ -175,14 +248,16 @@ export async function decideWithCloudflareClef(
 
   const deciderState = [
     `Spoken command: "${command}"`,
-    selectedText ? `Selected text in focused window: "${selectedText.slice(0, 500)}"` : 'Selected text: None (cursor only)'
+    selectedText
+      ? `Selected text in focused window (this text is the edit target):\n${selectedText.slice(0, 8_000)}`
+      : 'Selected text: None (cursor only)'
   ].join('\n');
 
   const questions = {
     intent: {
       type: 'choice',
       instructions: 'Determine what action the user wants to execute.',
-      choices: {
+      criteria: {
         image_generate: 'User wants to generate, draw, design, or create an image or photo',
         text_rewrite: 'User selected text and asks to edit, rewrite, fix, translate, or transform it',
         text_query: 'User asks a question, requests code, or asks assistant to generate text from scratch',
@@ -192,7 +267,7 @@ export async function decideWithCloudflareClef(
     tier: {
       type: 'choice',
       instructions: 'Select model tier: low uses fewer neurons for standard tasks, balanced for complex ones.',
-      choices: {
+      criteria: {
         low: 'Standard or simple task for minimum neuron consumption',
         balanced: 'Nuanced, long, or multi-step task'
       }
@@ -205,10 +280,9 @@ export async function decideWithCloudflareClef(
       apiToken,
       CLOUDFLARE_CLEF_DECIDER_MODEL,
       {
+        model: 'clef',
         state: deciderState,
-        questions,
-        // Also include prompt for models accepting prompt-based JSON output
-        prompt: `You are CLEF, an AI decision model.\n${deciderState}\nReturn strict JSON: {"intent": "image_generate" | "text_rewrite" | "text_query" | "plain_dictation", "tier": "low" | "balanced"}`
+        questions
       },
       15_000,
       signal
@@ -228,33 +302,49 @@ export async function decideWithCloudflareClef(
  */
 export function cleanRewrittenText(raw: string): string {
   if (!raw) return '';
-  let text = raw.trim();
+  let text = raw.replace(/\r\n?/g, '\n').replace(/\u0000/g, '').trim();
 
-  // Strip common conversational introductory preambles (case-insensitive)
+  // Strip labels the model may add even though the prompt forbids them.
   text = text.replace(
-    /^(?:Here is the rewritten text:?|Rewritten text:?|Professional version:?|Here is the professional version:?|Here is the revised text:?|Revised text:?|Here's the rewritten text:?|Here is your text:?|Here is an improved version:?|Transformed text:?|Formal version:?|Output:?)\s*/i,
+    /^\s*(?:[*_]{1,3})?(?:here is |here's )?(?:the )?(?:rewritten|edited|revised|transformed|improved|professional|formal|final)?\s*(?:text|version|output)?\s*(?:[*_]{1,3})?\s*:\s*/i,
     ''
   );
 
-  // If the model hallucinates a code block or python script at the end of a plain text rewrite, truncate at the code block
-  const codeBlockIndex = text.indexOf('```');
+  // A plain-text rewrite must never include a markdown/code section.
+  const codeBlockIndex = text.search(/\x60\x60\x60/);
   if (codeBlockIndex !== -1) {
-    const beforeCode = text.slice(0, codeBlockIndex).trim();
-    if (beforeCode.length > 0) {
-      text = beforeCode;
-    } else {
-      // If the entire output was wrapped in a code block, extract the content inside
-      const match = text.match(/```(?:[a-zA-Z0-9_-]+)?\s*([\s\S]*?)\s*```/);
-      if (match && match[1]) {
-        text = match[1].trim();
-      }
-    }
+    const naturalLead = text.slice(0, codeBlockIndex).trim();
+    const fencedBody = text.match(/^\x60\x60\x60(?:[a-zA-Z0-9_+-]+)?\s*([\s\S]*?)\s*\x60\x60\x60/);
+    text = naturalLead || fencedBody?.[1]?.trim() || '';
   }
 
-  // Strip trailing backtick loops or runaway punctuation
-  text = text.replace(/(`\s*)+$/g, '').trim();
+  // Stop at model self-review. Some instruction-tuned models answer the edit,
+  // then start evaluating their own answer and repeat it indefinitely.
+  text = text.replace(
+    /\s+(?:I\s+(?:made|did)\s+no\s+changes|the\s+(?:original\s+)?response\s+(?:is|already)|the\s+final\s+answer\s+(?:is|does)|the\s+response\s+(?:is|already)|(?:no|there\s+are\s+no)\s+(?:further|additional)\s+changes)\b[\s\S]*$/i,
+    ''
+  ).trim();
 
-  // Strip wrapping quotes if the whole text was enclosed in quotes by the model
+  // Handle malformed model output such as repeated single backticks.
+  text = text.replace(/(?:\s*\x60){1,}\s*$/g, '').trim();
+  text = text.replace(/\n\s*(?:explanation|implementation|here is the code|here's the code)\s*:\s*[\s\S]*$/i, '').trim();
+
+  // If a model repeated the same complete sentence, keep one copy only.
+  const sentences = text.match(/[^.!?]+[.!?]+/g) ?? [];
+  if (sentences.length >= 2) {
+    const counts = new Map<string, number>();
+    for (const sentence of sentences) {
+      const key = sentence.replace(/\s+/g, ' ').trim().toLowerCase();
+      counts.set(key, (counts.get(key) ?? 0) + 1);
+    }
+    const repeated = sentences.find((sentence) => {
+      const key = sentence.replace(/\s+/g, ' ').trim().toLowerCase();
+      return (counts.get(key) ?? 0) >= 2;
+    });
+    if (repeated) text = repeated.trim();
+  }
+
+  // Strip wrapping quotes if the whole text was enclosed in quotes by the model.
   if ((text.startsWith('"') && text.endsWith('"')) || (text.startsWith("'") && text.endsWith("'"))) {
     if (text.length >= 2) {
       text = text.slice(1, -1).trim();
@@ -262,6 +352,11 @@ export function cleanRewrittenText(raw: string): string {
   }
 
   return text;
+}
+
+function containsUnexpectedCode(text: string): boolean {
+  return /(?:^|\n)\s*(?:import\s+[a-z_$]|from\s+[a-z_$].*\s+import\s+|def\s+[a-z_$][\w$]*\s*\(|function\s+[a-z_$][\w$]*\s*\(|(?:const|let|var)\s+[a-z_$][\w$]*\s*=)/im.test(text)
+    || /\b(?:re\.sub|rewrite_text\s*\(|print\s*\()/i.test(text);
 }
 
 /**
@@ -306,10 +401,7 @@ export async function generateResponseWithCloudflareClef(
     apiToken,
     selectedModel,
     {
-      messages: [
-        { role: 'system', content: systemInstructions },
-        { role: 'user', content: userContent }
-      ],
+      prompt: `${systemInstructions}\n\n${userContent}`,
       max_tokens: 1200,
       temperature: 0.2
     },
@@ -354,32 +446,15 @@ export async function rewriteWithCloudflareClef(
 
   // If tier was not pre-decided, run CLEF decider
   if (!tier) {
-    const deciderPrompt = [
-      'You are CLEF, a model-tier decider for text editing.',
-      'Return strict JSON only with keys: tier and mode.',
-      'tier: "low" for simple edits, "balanced" for nuanced or complex rewrites.',
-      'mode: "rewrite" when user wants selected text edited, "respond" when user asks a new answer.',
-      `Command: ${command}`,
-      `Selected text length: ${selectedText.length}`
-    ].join('\n');
-
-    try {
-      const deciderRaw = await runCloudflareModel(
-        accountId,
-        apiToken,
-        CLOUDFLARE_CLEF_DECIDER_MODEL,
-        { prompt: deciderPrompt, max_tokens: 96, temperature: 0 },
-        15_000,
-        signal
-      );
-      const parsedText = parseModelTextResponse(deciderRaw);
-      const decision = parseClefDecision(parsedText);
-      tier = decision.tier;
-      mode = decision.mode;
-    } catch {
-      tier = 'low';
-      mode = 'rewrite';
-    }
+    const decision = await decideWithCloudflareClef(
+      accountId,
+      apiToken,
+      { command, selectedText },
+      'text_rewrite',
+      signal
+    );
+    tier = decision.tier;
+    mode = decision.intent === 'text_query' ? 'respond' : 'rewrite';
   }
 
   const selectedModel = tier === 'balanced' ? CLOUDFLARE_CLEF_BALANCED_MODEL : CLOUDFLARE_CLEF_LOW_MODEL;
@@ -394,16 +469,24 @@ export async function rewriteWithCloudflareClef(
         'STRICT RULES:',
         '1. Return ONLY the final transformed text that will replace the user\'s text.',
         '2. NEVER write "Rewritten text:", "Here is the revised text:", or any introductory phrases.',
-        '3. NEVER provide code, scripts, python regex, or explanations unless explicitly requested.',
-        '4. Do not wrap the text in markdown code fences (```) or quotes.',
-        '5. Stop generating immediately when the rewritten text is complete.'
+        '3. NEVER provide code, scripts, Python, regex, explanations, or a rewrite procedure.',
+        '4. Do not include labels such as Rewritten text: or Final answer:.',
+        '5. Do not wrap the result in markdown code fences, backticks, or quotes.',
+        '6. Return exactly one transformed version, never repeat it.',
+        '7. Do not evaluate, explain, or defend your answer.',
+        '8. Stop immediately after the replacement text is complete.'
       ].join('\n');
 
   const userContent = [
-    `Instruction: ${command}`,
+    '<instruction>',
+    command,
+    '</instruction>',
     '',
-    'Selected Text:',
-    selectedText
+    '<selected_text>',
+    selectedText,
+    '</selected_text>',
+    '',
+    'Return only the transformed selected text. Do not describe the changes.'
   ].join('\n');
 
   const rawResult = await runCloudflareModel(
@@ -411,10 +494,6 @@ export async function rewriteWithCloudflareClef(
     apiToken,
     selectedModel,
     {
-      messages: [
-        { role: 'system', content: systemInstructions },
-        { role: 'user', content: userContent }
-      ],
       prompt: `${systemInstructions}\n\n${userContent}`,
       max_tokens: 600,
       temperature: 0.15
@@ -425,6 +504,9 @@ export async function rewriteWithCloudflareClef(
 
   const rawText = parseModelTextResponse(rawResult);
   const rewritten = isCodeRequested ? rawText.trim() : cleanRewrittenText(rawText);
+  if (!isCodeRequested && containsUnexpectedCode(rewritten)) {
+    throw new PipelineError('permanent', 'handle', 'Cloudflare returned an invalid rewrite response. Please try the command again.');
+  }
   if (!rewritten.trim()) {
     throw new PipelineError('permanent', 'handle', 'Cloudflare returned an empty rewrite response.');
   }

@@ -19,10 +19,12 @@
 
 ## What Tawny does
 
-Tawny is a Windows tray utility that turns one global shortcut into either:
+Tawny is a Windows tray utility that turns one global shortcut into four focused actions:
 
 - **Plain dictation:** transcribe speech and paste the text into the application that was focused before Tawny opened.
 - **Image generation:** detect an image request, generate the image with Cloudflare Workers AI Flux, copy the image to the Windows clipboard, paste it into the focused application, and show a preview in Tawny.
+- **Selected-text rewriting:** capture text selected in the focused application, combine it with the spoken instruction, ask Cloudflare CLEF to select the correct action/tier, rewrite it with a low or balanced Llama model, and replace the selection.
+- **Text/code generation:** use the spoken request and optional selected-text context to generate a response or code, then paste it at the cursor.
 
 The application is designed around a short, observable pipeline. Every important boundary emits a structured log entry, provider failures are surfaced in the overlay, and the pipeline uses explicit states instead of an unbounded loading spinner.
 
@@ -48,25 +50,22 @@ Ctrl + Alt + Space
         │  wake phrase normalization and routing
         ▼
    deciding
-      ┌─┴────────────────────────────┐
-      │                              │
- plain text                    image intent
-      │                              │
-      ▼                              ▼
- clipboard text                 Cloudflare Flux
-      │                         @cf/black-forest-labs/
-      │                         flux-1-schnell
-      ▼                              │
- Ctrl + V                            │ save JPEG
-      │                              │ write image clipboard
-      └──────────────┬───────────────┘
-                     ▼
-                    done
+      │  selected text + voice command are sent together
+      ▼  Cloudflare CLEF: @cf/cloudflare/clef
+   ┌──┼───────────────┬────────────────┐
+   │  │               │                │
+ image rewrite       query/code       dictation
+   │  │               │                │
+ Flux CLEF/Llama     CLEF/Llama        clipboard text
+   │  │               │                │
+   └──┴───────────────┴─────── Ctrl + V
+                         │
+                        done
 ```
 
 ### Plain dictation
 
-Speech without an image-generation intent is treated as dictation, whether or not it contains a wake phrase:
+Speech is treated as dictation by default, whether or not it contains a wake phrase. Only an explicit rewrite, image, or assistant-generation command is routed to a model; ordinary questions and conversational sentences are pasted exactly as transcribed:
 
 ```text
 audio → Groq Whisper → transcript → clipboard.writeText → Ctrl+V → done
@@ -83,6 +82,12 @@ audio → Groq Whisper → intent detection → Cloudflare Flux
 ```
 
 The generated image is both saved locally and placed on the clipboard. This makes the result available even when the target application rejects simulated keyboard input.
+
+### Selected-text commands
+
+When text is already selected, Tawny captures it before opening the overlay so the original application remains the paste target. The spoken command and selected text are passed to Cloudflare CLEF together. CLEF chooses one intent (`text_rewrite`, `text_query`, `image_generate`, or `plain_dictation`) and a model tier (`low` or `balanced`), while local explicit-command guardrails prevent ordinary dictation from being upgraded into an assistant response. A local command dictionary acts as a deterministic fallback and guardrail for common editing language such as translation, grammar correction, professional/casual tone, rewriting, paraphrasing, summarizing, and concise/expanded output.
+
+For rewriting, the selected text is sent to the chosen Cloudflare Llama model with strict output instructions. The response is sanitized before injection: labels, markdown/code fences, Python or regex hallucinations, repeated backticks, self-review commentary, and repeated transformed sentences are removed or rejected. Only one transformed text result is pasted back over the original selection. For questions or code requests, the selected text is supplied as context and the generated answer is pasted at the cursor.
 
 ## Architecture
 
@@ -112,14 +117,16 @@ src/
 │   │   ├── gate.ts
 │   │   │   └── wake phrase normalization/matching
 │   │   ├── intent.ts
-│   │   │   └── local image-intent and negation detection
+│   │   │   └── local image, rewrite, and query dictionaries
 │   │   └── policy.ts
 │   │       └── pure routing policy helpers
 │   └── providers/
 │       ├── groqWhisper.ts
 │       │   └── Groq multipart audio transcription
-│       └── cloudflareFlux.ts
-│           └── Cloudflare Workers AI image client
+│       ├── cloudflareFlux.ts
+│       │   └── Cloudflare Workers AI image client
+│       └── cloudflareClef.ts
+│           └── CLEF intent/tier decider and low/balanced text models
 ├── renderer/
 │   ├── main.tsx
 │   │   ├── first-run page
@@ -160,8 +167,8 @@ The XState machine in [`src/main/pipeline/machine.ts`](./src/main/pipeline/machi
 | `recording` | Capturing microphone audio | `STOP → finalizing`, `CANCEL → cancelled` |
 | `finalizing` | Stopping recorder and assembling audio | `STAGE → transcribing`, `FAIL → failed` |
 | `transcribing` | Uploading audio to Groq | `STAGE → gating`, `FAIL → failed` |
-| `gating` | Checking wake phrase and routing policy | `STAGE → deciding`, completion → `done` |
-| `deciding` | Selecting plain text or image generation | completion → `done`, `STAGE → confirming` |
+| `gating` | Checking wake phrase and preparing the command | `STAGE → deciding` |
+| `deciding` | Combining selected text, voice command, local dictionary, and CLEF routing | `STAGE → handling` or `STAGE → injecting` |
 | `confirming` | Optional confirmation state | `CONFIRM/HOTKEY → handling` |
 | `handling` | Running a confirmed action | `STAGE → injecting`, `FAIL → failed` |
 | `injecting` | Pasting text or image into the target app | completion → `done` |
@@ -169,7 +176,7 @@ The XState machine in [`src/main/pipeline/machine.ts`](./src/main/pipeline/machi
 | `failed` | Recoverable visible failure | `HOTKEY → arming`, timeout → `idle` |
 | `cancelled` | User cancelled the active job | timeout → `idle` |
 
-The `gating → done` completion path is intentional: image generation and plain dictation can complete directly after routing, while the `injecting → done` path remains available for confirmed or staged actions.
+All currently supported actions finish through `injecting → done`; the confirmation state remains available for future high-risk actions.
 
 ## Providers
 
@@ -191,7 +198,20 @@ The `gating → done` completion path is intentional: image generation and plain
 - Response: validated Cloudflare envelope or direct image response
 - Output: Base64 JPEG
 
-Cloudflare errors are classified as permanent, transient, or timeout failures through [`PipelineError`](./src/shared/contracts.ts). API credentials and transcript contents are excluded from logs.
+### Cloudflare CLEF and text models
+
+- Decider: @cf/cloudflare/clef
+- Low tier: @cf/meta/llama-3.1-8b-instruct-fp8
+- Balanced tier: @cf/meta/llama-3.3-70b-instruct-fp8-fast
+
+The rewrite models use the current routable Workers AI IDs. Retired
+`@cf/meta/llama-3.1-8b-instruct` and `@cf/meta/llama-3.1-70b-instruct-fp8`
+IDs must not be used because Cloudflare returns `7000: No route for that URI`.
+- CLEF timeout: 15 seconds
+- Text generation/rewrite timeout: 45 seconds
+- If CLEF is unavailable, local intent dictionaries preserve safe routing for explicit image, rewrite, and query commands.
+
+Cloudflare errors are classified as permanent, transient, or timeout failures through [`PipelineError`](./src/shared/contracts.ts). API credentials and transcript contents are excluded from logs; diagnostics record only transcript length.
 
 ## Credentials
 
@@ -340,13 +360,16 @@ state.transition: done
 
 ## Tests
 
-The current suite contains 15 passing tests covering:
+The current suite contains 39 passing tests covering:
 
 - wake phrase normalization and matching,
 - plain dictation routing,
 - image-intent detection,
 - negation handling,
-- Cloudflare Flux response validation and error behavior.
+- selected-text rewrite/query dictionary patterns,
+- direct and wrapped CLEF decisions,
+- Cloudflare Flux response validation and error behavior,
+- Cloudflare CLEF response, rewrite, and low-tier generation behavior.
 
 Run the suite with:
 
