@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { chooseAction } from '../src/main/pipeline/policy';
 import { gateTranscript } from '../src/main/pipeline/gate';
-import { isExplicitTextQueryRequest, isImageGenerationRequest, isTextQueryRequest, isTextRewriteRequest } from '../src/main/pipeline/intent';
+import { isExplicitTextQueryRequest, isFastRewriteRequest, isImageGenerationRequest, isTextQueryRequest, isTextRewriteRequest, stripFastRewritePrefix } from '../src/main/pipeline/intent';
 
 const decision = (confidence: number, isRequest: number, intent: 'image_generate' | 'plain_text' | 'other_task' = 'image_generate') => ({
   confidence, isRequest, intent, probs: { image_generate: confidence }, decidedBy: 'test', latencyMs: 1
@@ -26,6 +26,12 @@ describe('selected-text command dictionary', () => {
     expect(isExplicitTextQueryRequest('give me python code for a calculator')).toBe(true);
     expect(isExplicitTextQueryRequest('what are you doing buddy can you tell me your plan')).toBe(false);
     expect(isExplicitTextQueryRequest('I need to write a message to my friend')).toBe(false);
+  });
+
+  it('recognizes and removes the opt-in fast rewrite trigger', () => {
+    expect(isFastRewriteRequest('quick make it professional')).toBe(true);
+    expect(stripFastRewritePrefix('quick make it professional')).toBe('make it professional');
+    expect(isFastRewriteRequest('quick what is the plan')).toBe(false);
   });
 
   it('does not classify ordinary dictation as an edit request', () => {

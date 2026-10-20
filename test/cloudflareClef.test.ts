@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
   CLOUDFLARE_CLEF_DECIDER_MODEL,
+  CLOUDFLARE_CLEF_FAST_MODEL,
   CLOUDFLARE_CLEF_LOW_MODEL,
   cleanRewrittenText,
   decideWithCloudflareClef,
@@ -159,14 +160,53 @@ describe('generateResponseWithCloudflareClef', () => {
       `https://api.cloudflare.com/client/v4/accounts/acc/ai/run/${CLOUDFLARE_CLEF_LOW_MODEL}`,
       expect.objectContaining({ method: 'POST' })
     );
-    const request = JSON.parse(fetchMock.mock.calls[0][1].body as string) as { prompt?: string; messages?: unknown };
-    expect(request.prompt).toContain('User request: give me python code for calculator');
-    expect(request).not.toHaveProperty('messages');
+    const request = JSON.parse(fetchMock.mock.calls[0][1].body as string) as {
+      prompt?: string;
+      messages?: Array<{ role: string; content: string }>;
+    };
+    expect(request.messages?.[1]?.content).toContain('User request: give me python code for calculator');
+    expect(request).not.toHaveProperty('prompt');
     vi.unstubAllGlobals();
   });
 });
 
 describe('Cloudflare CLEF rewrite provider', () => {
+  it('uses the fast model when the caller explicitly selects fast mode', async () => {
+    const fetchMock = vi.fn().mockResolvedValueOnce(
+      new Response(JSON.stringify({ result: { response: 'Fast edited output.' }, success: true }), { status: 200 })
+    );
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(rewriteWithCloudflareClef('account', 'token', {
+      selectedText: 'Old text.',
+      command: 'Make it concise.',
+      tier: 'fast'
+    })).resolves.toMatchObject({ model: CLOUDFLARE_CLEF_FAST_MODEL, tier: 'fast' });
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      `https://api.cloudflare.com/client/v4/accounts/account/ai/run/${CLOUDFLARE_CLEF_FAST_MODEL}`,
+      expect.objectContaining({ method: 'POST' })
+    );
+    vi.unstubAllGlobals();
+  });
+
+  it('retries a suspiciously short rewrite before replacing the selection', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ result: { response: 'Hello, sir.' }, success: true }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ result: { response: 'Hello, sir. I was wondering whether you have observed any positive developments so far, despite not yet meeting to present a promising new project that could become a successful product.' }, success: true }), { status: 200 }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const result = await rewriteWithCloudflareClef('account', 'token', {
+      selectedText: 'Hello sir. I would like to know whether you have seen any positive signs so far, even though I have not yet had the opportunity to meet with you to present a new project that could become a successful product.',
+      command: 'Transform this into a professional and grammatically correct sentence.',
+      tier: 'balanced'
+    });
+
+    expect(result.text).toContain('positive developments so far');
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    vi.unstubAllGlobals();
+  });
+
   it('runs decider then rewrite and returns rewritten text', async () => {
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(new Response(JSON.stringify({ result: { response: '{"tier":"low","mode":"rewrite"}' }, success: true }), { status: 200 }))
@@ -190,11 +230,11 @@ describe('Cloudflare CLEF rewrite provider', () => {
     );
     const rewriteRequest = JSON.parse(fetchMock.mock.calls[1][1].body as string) as {
       prompt?: string;
-      messages?: unknown;
+      messages?: Array<{ role: string; content: string }>;
     };
-    expect(rewriteRequest.prompt).toContain('Old paragraph.');
-    expect(rewriteRequest.prompt).toContain('Make it concise and clear.');
-    expect(rewriteRequest).not.toHaveProperty('messages');
+    expect(rewriteRequest.messages?.[1]?.content).toContain('Old paragraph.');
+    expect(rewriteRequest.messages?.[1]?.content).toContain('Make it concise and clear.');
+    expect(rewriteRequest).not.toHaveProperty('prompt');
     expect(fetchMock).toHaveBeenCalledTimes(2);
     vi.unstubAllGlobals();
   });

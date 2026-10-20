@@ -26,6 +26,8 @@ const explicitQueryPatterns = [
   /\b(?:help me|can you)\b.{0,80}\b(?:write|draft|generate|create|explain|solve|calculate|answer)\b/
 ];
 
+const fastRewritePrefix = /^(?:quick|quickly|fast|instant|instantly|speedy)\b(?:\s+please)?\s*/i;
+
 function normalizeCommand(value: string): string {
   return value.normalize('NFKC').toLowerCase().replace(/[^\p{L}\p{N}\s]/gu, ' ').replace(/\s+/g, ' ').trim();
 }
@@ -52,4 +54,13 @@ export function isTextQueryRequest(text: string): boolean {
 export function isExplicitTextQueryRequest(text: string): boolean {
   const normalized = normalizeCommand(text);
   return Boolean(normalized) && explicitQueryPatterns.some((pattern) => pattern.test(normalized));
+}
+
+export function isFastRewriteRequest(text: string): boolean {
+  const command = text.trim().replace(fastRewritePrefix, '').trim();
+  return command !== text.trim() && isTextRewriteRequest(command);
+}
+
+export function stripFastRewritePrefix(text: string): string {
+  return text.trim().replace(fastRewritePrefix, '').trim();
 }

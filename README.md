@@ -87,7 +87,9 @@ The generated image is both saved locally and placed on the clipboard. This make
 
 When text is already selected, Tawny captures it before opening the overlay so the original application remains the paste target. The spoken command and selected text are passed to Cloudflare CLEF together. CLEF chooses one intent (`text_rewrite`, `text_query`, `image_generate`, or `plain_dictation`) and a model tier (`low` or `balanced`), while local explicit-command guardrails prevent ordinary dictation from being upgraded into an assistant response. A local command dictionary acts as a deterministic fallback and guardrail for common editing language such as translation, grammar correction, professional/casual tone, rewriting, paraphrasing, summarizing, and concise/expanded output.
 
-For rewriting, the selected text is sent to the chosen Cloudflare Llama model with strict output instructions. The response is sanitized before injection: labels, markdown/code fences, Python or regex hallucinations, repeated backticks, self-review commentary, and repeated transformed sentences are removed or rejected. Only one transformed text result is pasted back over the original selection. For questions or code requests, the selected text is supplied as context and the generated answer is pasted at the cursor.
+For rewriting, the selected text is sent to the chosen Cloudflare Llama model with strict output instructions. The response is sanitized before injection: labels, markdown/code fences, Python or regex hallucinations, repeated backticks, self-review commentary, and repeated transformed sentences are removed or rejected. Non-summary rewrites that are suspiciously shorter than the source are retried once with meaning-preservation instructions; if the retry is still incomplete, Tawny leaves the selection untouched and reports a recoverable error. Only one complete transformed text result is pasted back over the original selection. For questions or code requests, the selected text is supplied as context and the generated answer is pasted at the cursor.
+
+For an opt-in faster rewrite, begin the voice command with `quick`, `fast`, `instant`, or `speedy`, for example: `quick make it professional`. Tawny removes the trigger, skips the extra CLEF tier-selection request, and uses the active fast 8B model. The normal rewrite path remains the quality-first default and still lets CLEF choose between low and balanced tiers.
 
 ## Architecture
 
@@ -201,6 +203,7 @@ All currently supported actions finish through `injecting → done`; the confirm
 ### Cloudflare CLEF and text models
 
 - Decider: @cf/cloudflare/clef
+- Fast rewrite tier: @cf/meta/llama-3.1-8b-instruct-fast
 - Low tier: @cf/meta/llama-3.1-8b-instruct-fp8
 - Balanced tier: @cf/meta/llama-3.3-70b-instruct-fp8-fast
 
@@ -360,7 +363,7 @@ state.transition: done
 
 ## Tests
 
-The current suite contains 39 passing tests covering:
+The current suite contains 42 passing tests covering:
 
 - wake phrase normalization and matching,
 - plain dictation routing,

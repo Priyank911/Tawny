@@ -1,13 +1,14 @@
 import { PipelineError } from '../../shared/contracts';
 
 export const CLOUDFLARE_CLEF_DECIDER_MODEL = '@cf/cloudflare/clef';
+export const CLOUDFLARE_CLEF_FAST_MODEL = '@cf/meta/llama-3.1-8b-instruct-fast';
 // Keep these IDs aligned with the currently routable Workers AI catalog.
 // The older llama-3.1-8b-instruct and llama-3.1-70b-instruct-fp8 routes now
 // return 7000 ("No route for that URI") from the AI Gateway endpoint.
 export const CLOUDFLARE_CLEF_LOW_MODEL = '@cf/meta/llama-3.1-8b-instruct-fp8';
 export const CLOUDFLARE_CLEF_BALANCED_MODEL = '@cf/meta/llama-3.3-70b-instruct-fp8-fast';
 
-export type ClefTier = 'low' | 'balanced';
+export type ClefTier = 'fast' | 'low' | 'balanced';
 export type ClefMode = 'rewrite' | 'respond';
 export type ClefIntent = 'image_generate' | 'text_rewrite' | 'text_query' | 'plain_dictation';
 
@@ -359,6 +360,22 @@ function containsUnexpectedCode(text: string): boolean {
     || /\b(?:re\.sub|rewrite_text\s*\(|print\s*\()/i.test(text);
 }
 
+function isCompressionRewrite(command: string): boolean {
+  return /\b(?:summari[sz]e|summary|shorten|shorter|concise|brief|condense|simplify|reduce|compress|tl\s*;?\s*dr|one\s+sentence)\b/i.test(command);
+}
+
+function wordCount(text: string): number {
+  return text.trim() ? text.trim().split(/\s+/).length : 0;
+}
+
+function isLikelyIncompleteRewrite(source: string, result: string, command: string): boolean {
+  if (isCompressionRewrite(command)) return false;
+  const sourceWords = wordCount(source);
+  const resultWords = wordCount(result);
+  if (sourceWords < 18) return false;
+  return resultWords < Math.max(8, Math.floor(sourceWords * 0.45));
+}
+
 /**
  * Generate code, answers, or new content using a low-grade model for minimal neuron usage.
  */
@@ -374,7 +391,11 @@ export async function generateResponseWithCloudflareClef(
   const command = input.command.trim();
   if (!command) throw new PipelineError('input', 'handle', 'No command was spoken.');
 
-  const selectedModel = input.tier === 'balanced' ? CLOUDFLARE_CLEF_BALANCED_MODEL : CLOUDFLARE_CLEF_LOW_MODEL;
+  const selectedModel = input.tier === 'balanced'
+    ? CLOUDFLARE_CLEF_BALANCED_MODEL
+    : input.tier === 'fast'
+      ? CLOUDFLARE_CLEF_FAST_MODEL
+      : CLOUDFLARE_CLEF_LOW_MODEL;
 
   const isCodeRequest = /\b(?:code|python|py|javascript|js|typescript|ts|html|css|sql|function|script|algorithm|regex|calculator|increment|decrement)\b/i.test(command);
 
@@ -401,7 +422,10 @@ export async function generateResponseWithCloudflareClef(
     apiToken,
     selectedModel,
     {
-      prompt: `${systemInstructions}\n\n${userContent}`,
+      messages: [
+        { role: 'system', content: systemInstructions },
+        { role: 'user', content: userContent }
+      ],
       max_tokens: 1200,
       temperature: 0.2
     },
@@ -457,7 +481,11 @@ export async function rewriteWithCloudflareClef(
     mode = decision.intent === 'text_query' ? 'respond' : 'rewrite';
   }
 
-  const selectedModel = tier === 'balanced' ? CLOUDFLARE_CLEF_BALANCED_MODEL : CLOUDFLARE_CLEF_LOW_MODEL;
+  const selectedModel = tier === 'balanced'
+    ? CLOUDFLARE_CLEF_BALANCED_MODEL
+    : tier === 'fast'
+      ? CLOUDFLARE_CLEF_FAST_MODEL
+      : CLOUDFLARE_CLEF_LOW_MODEL;
   const isCodeRequested = /\b(?:code|python|py|javascript|js|script|regex|function)\b/i.test(command);
 
   const systemInstructions = isCodeRequested
@@ -473,8 +501,10 @@ export async function rewriteWithCloudflareClef(
         '4. Do not include labels such as Rewritten text: or Final answer:.',
         '5. Do not wrap the result in markdown code fences, backticks, or quotes.',
         '6. Return exactly one transformed version, never repeat it.',
-        '7. Do not evaluate, explain, or defend your answer.',
-        '8. Stop immediately after the replacement text is complete.'
+        '7. Unless the instruction explicitly asks for a summary or shorter text, preserve every fact, question, greeting, and idea from the selected text.',
+        '8. Do not replace a multi-idea paragraph with only its first greeting or first sentence.',
+        '9. Do not evaluate, explain, or defend your answer.',
+        '10. Stop immediately after the replacement text is complete.'
       ].join('\n');
 
   const userContent = [
@@ -494,7 +524,10 @@ export async function rewriteWithCloudflareClef(
     apiToken,
     selectedModel,
     {
-      prompt: `${systemInstructions}\n\n${userContent}`,
+      messages: [
+        { role: 'system', content: systemInstructions },
+        { role: 'user', content: userContent }
+      ],
       max_tokens: 600,
       temperature: 0.15
     },
@@ -503,7 +536,35 @@ export async function rewriteWithCloudflareClef(
   );
 
   const rawText = parseModelTextResponse(rawResult);
-  const rewritten = isCodeRequested ? rawText.trim() : cleanRewrittenText(rawText);
+  let rewritten = isCodeRequested ? rawText.trim() : cleanRewrittenText(rawText);
+
+  // Balanced models can occasionally stop after the first clause. Retry once
+  // with an explicit preservation instruction before touching the selection.
+  if (!isCodeRequested && isLikelyIncompleteRewrite(selectedText, rewritten, command)) {
+    console.warn('Cloudflare rewrite appeared incomplete; retrying with meaning-preservation instructions.');
+    const retryResult = await runCloudflareModel(
+      accountId,
+      apiToken,
+      selectedModel,
+      {
+        messages: [
+          { role: 'system', content: `${systemInstructions}\n\nIMPORTANT: This is not a summary request. Preserve every idea and clause from the selected text. Return the complete professional rewrite, not only the greeting or first sentence.` },
+          { role: 'user', content: userContent }
+        ],
+        max_tokens: 900,
+        temperature: 0.05
+      },
+      45_000,
+      signal
+    );
+    const retryText = cleanRewrittenText(parseModelTextResponse(retryResult));
+    if (!isLikelyIncompleteRewrite(selectedText, retryText, command)) {
+      rewritten = retryText;
+    } else {
+      throw new PipelineError('transient', 'handle', 'Cloudflare returned an incomplete rewrite. Please try the command again.');
+    }
+  }
+
   if (!isCodeRequested && containsUnexpectedCode(rewritten)) {
     throw new PipelineError('permanent', 'handle', 'Cloudflare returned an invalid rewrite response. Please try the command again.');
   }

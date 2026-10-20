@@ -4,7 +4,7 @@ import { writeFile } from 'node:fs/promises';
 import { createActor } from 'xstate';
 import { pipelineMachine } from './pipeline/machine';
 import { gateTranscript } from './pipeline/gate';
-import { isExplicitTextQueryRequest, isImageGenerationRequest, isTextRewriteRequest } from './pipeline/intent';
+import { isExplicitTextQueryRequest, isFastRewriteRequest, isImageGenerationRequest, isTextRewriteRequest, stripFastRewritePrefix } from './pipeline/intent';
 import { captureSelectedText, pasteImage, pasteText } from './inject';
 import { PipelineError, type OverlaySnapshot } from '../shared/contracts';
 import { readProviderSettings, saveProviderSettings } from './settings';
@@ -338,7 +338,7 @@ ipcMain.handle('audio:transcribe', async (_event, audio: Uint8Array) => {
 
     actor.send({ type: 'STAGE', stage: 'deciding' });
 
-    const routedCommand = (gate.routed && gate.text ? gate.text : transcript).trim();
+    const initialCommand = (gate.routed && gate.text ? gate.text : transcript).trim();
 
     // 1. Retrieve selected text captured when hotkey was first pressed
     let selectedText = '';
@@ -361,6 +361,9 @@ ipcMain.handle('audio:transcribe', async (_event, audio: Uint8Array) => {
       });
     }
 
+    const fastRewriteRequested = Boolean(selectedText) && isFastRewriteRequest(initialCommand);
+    const routedCommand = fastRewriteRequested ? stripFastRewritePrefix(initialCommand) : initialCommand;
+
     // 2. Compute baseline heuristic fallback
     const isImageHeuristic = isImageGenerationRequest(routedCommand) || isImageGenerationRequest(transcript);
     const isRewriteHeuristic = Boolean(selectedText) && isTextRewriteRequest(routedCommand);
@@ -373,15 +376,17 @@ ipcMain.handle('audio:transcribe', async (_event, audio: Uint8Array) => {
     // 3. Use Cloudflare CLEF only when the command explicitly needs a model.
     // Plain dictation must stay local after Whisper transcription so a normal
     // sentence can never turn into an assistant-generated response.
-    const shouldUseClef = isImageHeuristic || isRewriteHeuristic || isCodeOrQueryHeuristic;
-    const clefDecision = shouldUseClef
+    const shouldUseClef = !fastRewriteRequested && (isImageHeuristic || isRewriteHeuristic || isCodeOrQueryHeuristic);
+    const clefDecision = fastRewriteRequested
+      ? { intent: 'text_rewrite' as const, tier: 'fast' as const, confidence: 1 }
+      : shouldUseClef
       ? await decideWithCloudflareClef(
           settings.cloudflareAccountId,
           settings.cloudflareApiToken,
           { command: routedCommand, selectedText },
           fallbackIntent
         )
-      : { intent: 'plain_dictation' as const, tier: 'low' as const, confidence: 1 };
+        : { intent: 'plain_dictation' as const, tier: 'low' as const, confidence: 1 };
 
     // CLEF is the primary decider. Deterministic lexical guardrails protect
     // explicit image requests and edits of selected text when a response is
