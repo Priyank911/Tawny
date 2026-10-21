@@ -11,7 +11,7 @@ declare global {
       getSettings: () => Promise<ProviderSettings>;
       saveSettings: (settings: ProviderSettings) => Promise<void>;
       generateImage: (prompt: string) => Promise<{ base64: string; mimeType: 'image/jpeg' }>;
-      transcribeAudio: (audio: Uint8Array) => Promise<string>;
+      transcribeAudio: (audio: Uint8Array | Uint8Array[]) => Promise<string>;
       logCapture: (input: { event: string; message: string; level?: 'debug' | 'info' | 'warn' | 'error'; data?: Record<string, string> }) => void;
       onOpenSettings: (listener: () => void) => () => void;
       onOpenLogs: (listener: () => void) => () => void;

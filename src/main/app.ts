@@ -306,13 +306,22 @@ ipcMain.handle('image:generate', async (_event, prompt: unknown) => {
   }
 });
 
-ipcMain.handle('audio:transcribe', async (_event, audio: Uint8Array) => {
+ipcMain.handle('audio:transcribe', async (_event, audio: Uint8Array | Uint8Array[]) => {
   const startedAt = Date.now();
   const settings = await readProviderSettings();
+  const segments = Array.isArray(audio) ? audio : [audio];
+  const totalBytes = segments.reduce((total, segment) => total + (segment?.byteLength ?? 0), 0);
   actor.send({ type: 'STAGE', stage: 'transcribing' });
-  logPipeline({ event: 'provider.start', message: 'Uploading captured audio to Groq Whisper.', jobId: activeJobId, stage: 'stt', provider: 'groq-whisper', data: { bytes: String(audio?.byteLength ?? 0) } });
+  logPipeline({
+    event: 'provider.start',
+    message: `Uploading ${segments.length} audio segment${segments.length === 1 ? '' : 's'} to Groq Whisper.`,
+    jobId: activeJobId,
+    stage: 'stt',
+    provider: 'groq-whisper',
+    data: { bytes: String(totalBytes), segments: String(segments.length) }
+  });
   try {
-    const transcript = await transcribeWithGroq(settings.groqApiKey, audio);
+    const transcript = await transcribeWithGroq(settings.groqApiKey, segments);
     if (!transcript) throw new Error('Groq returned an empty transcript.');
     logPipeline({
       event: 'provider.success',
@@ -321,7 +330,7 @@ ipcMain.handle('audio:transcribe', async (_event, audio: Uint8Array) => {
       stage: 'stt',
       provider: 'groq-whisper',
       durationMs: Date.now() - startedAt,
-      data: { characters: String(transcript.length) }
+      data: { characters: String(transcript.length), segments: String(segments.length) }
     });
     snapshot = { ...snapshot, message: `Heard: ${transcript}` };
     mainWindow?.webContents.send('overlay:update', snapshot);

@@ -71,6 +71,8 @@ Speech is treated as dictation by default, whether or not it contains a wake phr
 audio → Groq Whisper → transcript → clipboard.writeText → Ctrl+V → done
 ```
 
+Long recordings are rotated into 60-second WebM segments while the microphone remains open. Groq transcribes the segments in order and carries the previous transcript tail as context, so multi-minute dictation does not depend on one oversized upload or one fixed 30-second request timeout. This also keeps hour-long recordings below Groq's per-upload limits.
+
 ### Image generation
 
 Speech containing a supported image request is routed to Cloudflare Flux:
@@ -212,6 +214,7 @@ The rewrite models use the current routable Workers AI IDs. Retired
 IDs must not be used because Cloudflare returns `7000: No route for that URI`.
 - CLEF timeout: 15 seconds
 - Text generation/rewrite timeout: 45 seconds
+- Groq transcription timeout: 60–180 seconds per audio segment, based on segment size
 - If CLEF is unavailable, local intent dictionaries preserve safe routing for explicit image, rewrite, and query commands.
 
 Cloudflare errors are classified as permanent, transient, or timeout failures through [`PipelineError`](./src/shared/contracts.ts). API credentials and transcript contents are excluded from logs; diagnostics record only transcript length.
@@ -363,7 +366,7 @@ state.transition: done
 
 ## Tests
 
-The current suite contains 42 passing tests covering:
+The current suite contains 44 passing tests covering:
 
 - wake phrase normalization and matching,
 - plain dictation routing,

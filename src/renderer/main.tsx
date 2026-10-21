@@ -4,6 +4,8 @@ import { ChevronRight, Image as ImageIcon, LoaderCircle, Sparkles, ScrollText, S
 import type { OverlaySnapshot, PipelineLog, ProviderSettings } from '../shared/contracts';
 import './styles.css';
 
+const RECORDING_SEGMENT_MS = 60_000;
+
 function App(): ReactElement {
   const [snapshot, setSnapshot] = useState<OverlaySnapshot>({ state: 'idle', elapsedMs: 0, rms: 0 });
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -17,21 +19,45 @@ function App(): ReactElement {
   const recorderRef = useRef<MediaRecorder | undefined>(undefined);
   const streamRef = useRef<MediaStream | undefined>(undefined);
   const chunksRef = useRef<Blob[]>([]);
+  const segmentsRef = useRef<Blob[]>([]);
+  const segmentTimerRef = useRef<number | undefined>(undefined);
+  const rotatingRef = useRef(false);
   const capturePendingRef = useRef<Promise<void> | undefined>(undefined);
   const stopRequestedRef = useRef(false);
+  const cancelledCaptureRef = useRef(false);
   const finalizedRef = useRef(false);
-  const finalizeCaptureRef = useRef<(() => void) | undefined>(undefined);
-  finalizeCaptureRef.current = () => {
+  const finalizeCaptureRef = useRef<((finalSegment?: Blob) => void) | undefined>(undefined);
+  finalizeCaptureRef.current = (finalSegment?: Blob) => {
     if (finalizedRef.current) return;
     finalizedRef.current = true;
+    if (segmentTimerRef.current !== undefined) {
+      window.clearTimeout(segmentTimerRef.current);
+      segmentTimerRef.current = undefined;
+    }
+    if (cancelledCaptureRef.current) {
+      segmentsRef.current = [];
+      chunksRef.current = [];
+      recorderRef.current = undefined;
+      streamRef.current?.getTracks().forEach((track) => track.stop());
+      streamRef.current = undefined;
+      return;
+    }
     const recorder = recorderRef.current;
-    if (!recorder) return;
-    const blob = new Blob(chunksRef.current, { type: recorder.mimeType || 'audio/webm' });
-    window.voiceRouter.logCapture({ event: 'capture.finalized', message: 'Microphone audio finalized.', data: { bytes: String(blob.size), mimeType: blob.type } });
+    const lastSegment = finalSegment ?? (recorder ? new Blob(chunksRef.current, { type: recorder.mimeType || 'audio/webm' }) : undefined);
+    const segments = [...segmentsRef.current, ...(lastSegment && lastSegment.size > 0 ? [lastSegment] : [])];
+    segmentsRef.current = [];
+    const totalBytes = segments.reduce((total, segment) => total + segment.size, 0);
+    window.voiceRouter.logCapture({
+      event: 'capture.finalized',
+      message: `Microphone audio finalized into ${segments.length} segment${segments.length === 1 ? '' : 's'}.`,
+      data: { bytes: String(totalBytes), segments: String(segments.length), mimeType: segments[0]?.type || recorder?.mimeType || 'audio/webm' }
+    });
     recorderRef.current = undefined;
     streamRef.current?.getTracks().forEach((track) => track.stop());
     streamRef.current = undefined;
-    void blob.arrayBuffer().then((buffer) => window.voiceRouter.transcribeAudio(new Uint8Array(buffer))).catch(() => undefined);
+    void Promise.all(segments.map(async (segment) => new Uint8Array(await segment.arrayBuffer())))
+      .then((audioSegments) => window.voiceRouter.transcribeAudio(audioSegments))
+      .catch(() => undefined);
   };
   const state = snapshot.state;
   useEffect(() => {
@@ -56,23 +82,51 @@ function App(): ReactElement {
     if (state !== 'arming' || recorderRef.current || capturePendingRef.current) return undefined;
     const capture = async (): Promise<void> => {
       finalizedRef.current = false;
+      cancelledCaptureRef.current = false;
       stopRequestedRef.current = false;
       window.voiceRouter.logCapture({ event: 'capture.permission.request', message: 'Requesting microphone access.' });
       const stream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true } });
       streamRef.current = stream;
       chunksRef.current = [];
+      segmentsRef.current = [];
+      rotatingRef.current = false;
       const mimeType = ['audio/webm;codecs=opus', 'audio/webm'].find((type) => MediaRecorder.isTypeSupported(type));
       if (!mimeType) throw new Error('This system does not support WebM microphone recording.');
-      const recorder = new MediaRecorder(stream, { mimeType });
-      recorderRef.current = recorder;
-      recorder.ondataavailable = (event) => {
-        if (event.data.size > 0) chunksRef.current.push(event.data);
+      const startSegment = (): void => {
+        const recorder = new MediaRecorder(stream, { mimeType });
+        recorderRef.current = recorder;
+        chunksRef.current = [];
+        recorder.ondataavailable = (event) => {
+          if (event.data.size > 0) chunksRef.current.push(event.data);
+        };
+        recorder.onstop = () => {
+          if (segmentTimerRef.current !== undefined) {
+            window.clearTimeout(segmentTimerRef.current);
+            segmentTimerRef.current = undefined;
+          }
+          const segment = new Blob(chunksRef.current, { type: recorder.mimeType || mimeType });
+          chunksRef.current = [];
+          if (rotatingRef.current && !stopRequestedRef.current) {
+            rotatingRef.current = false;
+            if (segment.size > 0) segmentsRef.current.push(segment);
+            startSegment();
+            return;
+          }
+          rotatingRef.current = false;
+          finalizeCaptureRef.current?.(segment);
+        };
+        recorder.onerror = () => window.voiceRouter.logCapture({ level: 'error', event: 'capture.recorder.error', message: 'The microphone recorder reported an error.' });
+        recorder.start(250);
+        window.voiceRouter.logCapture({ event: 'capture.recording', message: 'Microphone recorder segment started.', data: { mimeType, segmentMs: String(RECORDING_SEGMENT_MS) } });
+        segmentTimerRef.current = window.setTimeout(() => {
+          if (recorderRef.current === recorder && recorder.state === 'recording' && !stopRequestedRef.current) {
+            rotatingRef.current = true;
+            recorder.stop();
+          }
+        }, RECORDING_SEGMENT_MS);
+        if (stopRequestedRef.current) recorder.stop();
       };
-      recorder.onstop = () => finalizeCaptureRef.current?.();
-      recorder.onerror = () => window.voiceRouter.logCapture({ level: 'error', event: 'capture.recorder.error', message: 'The microphone recorder reported an error.' });
-      recorder.start(250);
-      window.voiceRouter.logCapture({ event: 'capture.recording', message: 'Microphone recorder started.', data: { mimeType } });
-      if (stopRequestedRef.current) recorder.stop();
+      startSegment();
     };
     capturePendingRef.current = capture().catch((error: unknown) => {
       const message = error instanceof Error ? error.message : 'Microphone permission was denied.';
@@ -96,6 +150,27 @@ function App(): ReactElement {
     const recorder = recorderRef.current;
     if (recorder.state !== 'recording') return undefined;
     recorder.stop();
+    return undefined;
+  }, [state]);
+  useEffect(() => {
+    if (state !== 'cancelled') return undefined;
+    cancelledCaptureRef.current = true;
+    stopRequestedRef.current = true;
+    rotatingRef.current = false;
+    if (segmentTimerRef.current !== undefined) {
+      window.clearTimeout(segmentTimerRef.current);
+      segmentTimerRef.current = undefined;
+    }
+    const recorder = recorderRef.current;
+    if (recorder?.state === 'recording') {
+      recorder.stop();
+    } else {
+      recorderRef.current = undefined;
+      streamRef.current?.getTracks().forEach((track) => track.stop());
+      streamRef.current = undefined;
+      segmentsRef.current = [];
+      chunksRef.current = [];
+    }
     return undefined;
   }, [state]);
   const label = useMemo(() => {

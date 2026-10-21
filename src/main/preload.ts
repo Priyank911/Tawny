@@ -12,7 +12,7 @@ contextBridge.exposeInMainWorld('voiceRouter', {
   getSettings: (): Promise<ProviderSettings> => ipcRenderer.invoke('settings:get'),
   saveSettings: (settings: ProviderSettings): Promise<void> => ipcRenderer.invoke('settings:save', settings),
   generateImage: (prompt: string) => ipcRenderer.invoke('image:generate', prompt),
-  transcribeAudio: (audio: Uint8Array): Promise<string> => ipcRenderer.invoke('audio:transcribe', audio),
+  transcribeAudio: (audio: Uint8Array | Uint8Array[]): Promise<string> => ipcRenderer.invoke('audio:transcribe', audio),
   logCapture: (input: { event: string; message: string; level?: 'debug' | 'info' | 'warn' | 'error'; data?: Record<string, string> }): void => ipcRenderer.send('capture:log', input),
   onOpenSettings: (listener: () => void) => {
     const handler = () => listener();
