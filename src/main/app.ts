@@ -20,6 +20,14 @@ import { getRecentLogs, logPipeline, setLogSink } from './logger';
 import { startKeyWatcher, watchKeyRelease, cancelKeyReleaseWatch, makeWindowTopmost, stopKeyWatcher } from './keywatcherService';
 import { cancelGoogleSignIn, getAuthProfile, setAuthSessionInvalidatedHandler, signOut, startGoogleSignIn } from './auth';
 import { initializeUpdateService, onUpdateAvailable, openLatestReleasePage } from './updater';
+import { linuxPasswordStorePreference } from './linuxKeyring';
+
+const linuxPasswordStore = linuxPasswordStorePreference(
+  process.platform,
+  app.commandLine.hasSwitch('password-store'),
+  process.env.XDG_CURRENT_DESKTOP
+);
+if (linuxPasswordStore) app.commandLine.appendSwitch('password-store', linuxPasswordStore);
 
 let mainWindow: BrowserWindow | undefined;
 let tray: Tray | undefined;

@@ -280,7 +280,7 @@ function App(): ReactElement {
         <>
           <header className="topbar">
             <div className="brand">
-              <img className="brand-mark" src="/tawny-mark.svg" alt="" />
+              <img className="brand-mark" src="./tawny-mark.svg" alt="" />
               <span>Tawny</span>
             </div>
             <div className="top-actions">
@@ -308,7 +308,7 @@ function App(): ReactElement {
               <div className="preview-orbit orbit-one" />
               <div className="preview-orbit orbit-two" />
               <div className="preview-card">
-                <img src="/tawny-mark.svg" alt="" />
+                <img src="./tawny-mark.svg" alt="" />
                 <strong>Ready when you are</strong>
                 <span>Ctrl + Alt + Space</span>
               </div>
@@ -355,7 +355,7 @@ function App(): ReactElement {
             {/* Brand Section */}
             <div className="pill-brand">
               <div className="brand-badge">
-                <img className="brand-logo" src="/tawny-mark.svg" alt="Tawny" />
+                <img className="brand-logo" src="./tawny-mark.svg" alt="Tawny" />
               </div>
               <span className="brand-title">Tawny</span>
             </div>

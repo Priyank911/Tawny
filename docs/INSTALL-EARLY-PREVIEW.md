@@ -12,7 +12,13 @@ Open the `.dmg`, move Tawny to Applications, then Control-click Tawny and choose
 
 ## Linux
 
-Use the `.AppImage` (mark it executable, then run it) or install the `.deb` on Debian/Ubuntu. On GNOME Wayland, approve Tawny's global-shortcut portal prompt on first launch. For secure sign-in storage, have GNOME Keyring or KDE Wallet installed and unlocked. Automatic selected-text capture and paste require `xdotool` on X11; Wayland intentionally restricts synthetic keystrokes, so the result stays on the clipboard for manual paste when the compositor does not allow injection. Your distribution may warn because preview packages are unsigned. Verify `SHA256SUMS` first. AppImage installations can receive in-app updates; `.deb` updates are installed through the package manager, so Tawny points you to the new release instead of replacing system-managed files.
+Use the `.AppImage` (mark it executable, then run it) or install the `.deb` on Debian/Ubuntu. Tawny needs a desktop Secret Service for encrypted sign-in and provider credentials; it will not save these tokens using Linux's plaintext fallback. On non-KDE sessions—including Hyprland—Tawny uses libsecret, so a Secret Service provider such as GNOME Keyring must be installed, running, and unlocked. On Ubuntu/Debian, install it if missing:
+
+```sh
+sudo apt install gnome-keyring libsecret-1-0
+```
+
+Then sign out of the desktop session and sign back in so the keyring service is started and unlocked. On KDE Plasma, enable and unlock KWallet instead. If Tawny still reports that secure storage is unavailable, check that the keyring is running and unlocked before retrying sign-in. On Wayland, global shortcuts use the desktop portal; approve the first binding prompt if shown. Hyprland users need `xdg-desktop-portal` and its Hyprland backend (`xdg-desktop-portal-hyprland`) running for global shortcuts. Automatic selected-text capture and paste require `xdotool` on X11; Wayland intentionally restricts synthetic keystrokes, so the result stays on the clipboard for manual paste when the compositor does not allow injection. Your distribution may warn because preview packages are unsigned. Verify `SHA256SUMS` first. AppImage installations can receive in-app updates; `.deb` updates are installed through the package manager, so Tawny points you to the new release instead of replacing system-managed files.
 
 ## Verify SHA-256
 

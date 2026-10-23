@@ -239,7 +239,7 @@ Electron `safeStorage` encrypts provider credentials and the Firebase refresh se
 
 ### Requirements
 
-- Windows 10 or later, current macOS, or a current x64 Linux desktop
+- Windows 10 or later, macOS 13 or later, or a current x64 Linux desktop
 - Node.js 22 LTS
 - pnpm
 - A Groq API key

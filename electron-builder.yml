@@ -63,3 +63,6 @@ linux:
   synopsis: A keyboard-first desktop voice assistant
   description: Speak naturally and route dictation, rewriting, and image generation from your desktop.
   artifactName: Tawny-${version}-linux-${arch}.${ext}
+deb:
+  recommends:
+    - gnome-keyring

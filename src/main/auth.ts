@@ -66,7 +66,7 @@ function hasSecureStorage(): boolean {
 async function persistSession(value: StoredSession): Promise<void> {
   if (!hasSecureStorage()) {
     throw new Error(process.platform === 'linux'
-      ? 'Secure sign-in storage is unavailable. Install and unlock GNOME Keyring or KDE Wallet, then try again.'
+      ? 'Secure sign-in storage is unavailable. Non-KDE desktops (including Hyprland) need a running, unlocked Secret Service keyring; Ubuntu/Debian: install gnome-keyring and libsecret-1-0. KDE Plasma: unlock KWallet.'
       : 'Secure sign-in storage is unavailable on this device.');
   }
   const encrypted = safeStorage.encryptString(JSON.stringify(value));
@@ -226,7 +226,7 @@ export async function startGoogleSignIn(): Promise<AuthProfile> {
   }
   if (!hasSecureStorage()) {
     throw new Error(process.platform === 'linux'
-      ? 'Secure sign-in storage is unavailable. Install and unlock GNOME Keyring or KDE Wallet, then try again.'
+      ? 'Secure sign-in storage is unavailable. Non-KDE desktops (including Hyprland) need a running, unlocked Secret Service keyring; Ubuntu/Debian: install gnome-keyring and libsecret-1-0. KDE Plasma: unlock KWallet.'
       : 'Secure sign-in storage is unavailable on this device.');
   }
   if (pendingServer) throw new Error('A Google sign-in window is already open. Finish or close that window first.');

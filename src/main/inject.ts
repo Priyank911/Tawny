@@ -1,8 +1,8 @@
-import { clipboard, nativeImage } from 'electron';
+import { ClipboardItem, clipboard, nativeImage } from 'electron';
 import { execFile } from 'node:child_process';
 
 interface ClipboardSnapshot {
-  formats: Array<{ format: string; data: Buffer }>;
+  items: Array<Record<string, string | Electron.ClipboardBookmark | Blob>>;
 }
 
 function runCommand(command: string, args: string[]): Promise<void> {
@@ -44,45 +44,57 @@ function copyShortcut(): Promise<void> {
 export async function pasteText(text: string): Promise<void> {
   const value = text.trim();
   if (!value) throw new Error('There is no text to paste.');
-  clipboard.writeText(value);
+  await clipboard.writeText(value);
   await pasteShortcut();
 }
 
-function snapshotClipboard(): ClipboardSnapshot {
-  const formats = clipboard.availableFormats();
-  return {
-    formats: formats.map((format) => ({ format, data: clipboard.readBuffer(format) }))
-  };
+async function snapshotClipboard(): Promise<ClipboardSnapshot> {
+  const clipboardItems = await clipboard.read();
+  const items: ClipboardSnapshot['items'] = [];
+  for (const clipboardItem of clipboardItems) {
+    const item: ClipboardSnapshot['items'][number] = {};
+    for (const type of clipboardItem.types) {
+      const payload = await clipboardItem.getType(type);
+      item[type] = payload;
+    }
+    if (Object.keys(item).length > 0) items.push(item);
+  }
+  return { items };
 }
 
-function restoreClipboard(snapshot: ClipboardSnapshot): void {
-  clipboard.clear();
-  for (const entry of snapshot.formats) {
-    clipboard.writeBuffer(entry.format, entry.data);
+async function restoreClipboard(snapshot: ClipboardSnapshot): Promise<void> {
+  if (snapshot.items.length === 0) {
+    clipboard.clear();
+    return;
   }
+  await clipboard.write(snapshot.items.map((item) => new ClipboardItem(item)));
 }
 
 export async function captureSelectedText(maxLength = 8_000): Promise<string> {
-  const before = snapshotClipboard();
+  const before = await snapshotClipboard();
   const marker = `__tawny_copy_probe_${Date.now().toString(36)}_${Math.random().toString(36).slice(2)}__`;
   try {
-    clipboard.writeText(marker);
+    await clipboard.writeText(marker);
     // The global shortcut may arrive while Ctrl/Alt/Space are still held.
     // Retry once for slower editors and browser-based text fields.
     for (let attempt = 0; attempt < 2; attempt += 1) {
       await copyShortcut();
-      const copied = clipboard.readText().trim();
+      const copied = (await clipboard.readText()).trim();
       if (copied && copied !== marker) return copied.slice(0, Math.max(1, maxLength));
     }
     return '';
   } finally {
-    restoreClipboard(before);
+    await restoreClipboard(before);
   }
 }
 
 export async function pasteImage(base64: string): Promise<void> {
   const image = nativeImage.createFromBuffer(Buffer.from(base64, 'base64'));
   if (image.isEmpty()) throw new Error('Generated image data could not be placed on the clipboard.');
-  clipboard.writeImage(image);
+  await clipboard.write([
+    new ClipboardItem({
+      'image/png': new Blob([new Uint8Array(image.toPNG())], { type: 'image/png' })
+    })
+  ]);
   await pasteShortcut();
 }

@@ -23,7 +23,7 @@ export async function readProviderSettings(): Promise<ProviderSettings> {
 export async function saveProviderSettings(input: ProviderSettings): Promise<void> {
   if (!secureStorageAvailable()) {
     throw new Error(process.platform === 'linux'
-      ? 'Secure credential storage is unavailable. Install and unlock GNOME Keyring or KDE Wallet.'
+      ? 'Secure credential storage is unavailable. Non-KDE desktops (including Hyprland) need a running, unlocked Secret Service keyring; Ubuntu/Debian: install gnome-keyring and libsecret-1-0. KDE Plasma: unlock KWallet.'
       : 'Secure credential storage is unavailable on this device.');
   }
   const parsed = providerSettingsSchema.parse(input);
