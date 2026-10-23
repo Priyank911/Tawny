@@ -2,17 +2,24 @@
   "name": "voicerouter",
   "version": "0.1.0",
   "private": true,
-  "description": "A resilient Windows voice router for dictation and image generation.",
+  "description": "A resilient desktop voice assistant for Windows, macOS, and Linux.",
+  "author": "Tawny",
+  "desktopName": "com.tawny.desktop.desktop",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Priyank911/Tawny.git"
+  },
   "main": "out/main/index.js",
   "scripts": {
     "dev": "electron-vite dev",
     "build": "electron-vite build",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
+    "package": "pnpm build && electron-builder --publish never",
     "preview": "electron-vite preview"
   },
   "dependencies": {
-    "electron": "38.2.0",
+    "electron-updater": "^6.8.9",
     "lucide-react": "0.468.0",
     "react": "19.1.1",
     "react-dom": "19.1.1",
@@ -24,9 +31,17 @@
     "@types/react": "19.1.13",
     "@types/react-dom": "19.1.9",
     "@vitejs/plugin-react": "5.0.4",
+    "electron": "43.2.0",
+    "electron-builder": "^26.15.3",
     "electron-vite": "4.0.1",
     "typescript": "5.9.2",
     "vite": "7.1.7",
     "vitest": "3.2.4"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "electron",
+      "esbuild"
+    ]
   }
 }

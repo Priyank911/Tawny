@@ -7,6 +7,10 @@ let watcherProcess: ChildProcessWithoutNullStreams | undefined;
 let releaseCallback: (() => void) | undefined;
 
 function getBinaryPath(): string {
+  if (process.resourcesPath) {
+    const packagedPath = join(process.resourcesPath, 'native', 'keywatcher.exe');
+    if (existsSync(packagedPath)) return packagedPath;
+  }
   const devPath = join(__dirname, '../../src/main/native/keywatcher.exe');
   if (existsSync(devPath)) return devPath;
 
@@ -31,6 +35,7 @@ function getBinaryPath(): string {
 }
 
 export function startKeyWatcher(): void {
+  if (process.platform !== 'win32') return;
   if (watcherProcess && !watcherProcess.killed) return;
   const binary = getBinaryPath();
   if (!existsSync(binary)) {
@@ -89,6 +94,7 @@ export function cancelKeyReleaseWatch(): void {
 }
 
 export function makeWindowTopmost(hwndNumber: number | bigint): void {
+  if (process.platform !== 'win32') return;
   if (!watcherProcess || watcherProcess.killed) {
     startKeyWatcher();
   }

@@ -5,13 +5,13 @@
 <h1 align="center">Tawny</h1>
 
 <p align="center">
-  A private, keyboard-first voice layer for Windows.
+  A private, keyboard-first voice layer for Windows, macOS, and Linux.
 </p>
 
 <p align="center"><strong>Speak naturally. Work precisely.</strong></p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/platform-Windows-26302b?style=flat-square" alt="Windows">
+  <img src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-26302b?style=flat-square" alt="Windows, macOS, and Linux">
   <img src="https://img.shields.io/badge/runtime-Electron-718965?style=flat-square" alt="Electron">
   <img src="https://img.shields.io/badge/tests-15%20passing-718965?style=flat-square" alt="15 tests passing">
   <img src="https://img.shields.io/badge/license-private-d8d5ce?style=flat-square" alt="Private project">
@@ -19,10 +19,10 @@
 
 ## What Tawny does
 
-Tawny is a Windows tray utility that turns one global shortcut into four focused actions:
+Tawny is a desktop tray utility that turns one global shortcut into four focused actions:
 
 - **Plain dictation:** transcribe speech and paste the text into the application that was focused before Tawny opened.
-- **Image generation:** detect an image request, generate the image with Cloudflare Workers AI Flux, copy the image to the Windows clipboard, paste it into the focused application, and show a preview in Tawny.
+- **Image generation:** detect an image request, generate the image with Cloudflare Workers AI Flux, copy the image to the system clipboard, paste it into the focused application, and show a preview in Tawny.
 - **Selected-text rewriting:** capture text selected in the focused application, combine it with the spoken instruction, ask Cloudflare CLEF to select the correct action/tier, rewrite it with a low or balanced Llama model, and replace the selection.
 - **Text/code generation:** use the spoken request and optional selected-text context to generate a response or code, then paste it at the cursor.
 
@@ -80,7 +80,7 @@ Speech containing a supported image request is routed to Cloudflare Flux:
 ```text
 audio → Groq Whisper → intent detection → Cloudflare Flux
       → validated Base64 JPEG → userData image file
-      → native Windows image clipboard → Ctrl+V → overlay preview → done
+      → native image clipboard → platform paste shortcut → overlay preview → done
 ```
 
 The generated image is both saved locally and placed on the clipboard. This makes the result available even when the target application rejects simulated keyboard input.
@@ -155,7 +155,7 @@ The renderer owns visible UI and microphone recording. The main process owns pri
 | Renderer → preload | Request microphone access and collect `MediaRecorder` chunks |
 | Preload → main | Send audio bytes, settings operations, pipeline events, and IPC requests |
 | Main → providers | Call Groq and Cloudflare over HTTPS |
-| Main → Windows | Write encrypted settings, save generated files, access the clipboard, simulate `Ctrl+V` |
+| Main → operating system | Store encrypted settings and Firebase sessions, access the clipboard, and request platform-specific paste keystrokes |
 | Main → renderer | Send sanitized overlay snapshots and structured log entries |
 
 The preload exposes only explicit functions through `contextBridge`; the renderer never receives Node.js or Electron primitives directly.
@@ -223,10 +223,9 @@ Cloudflare errors are classified as permanent, transient, or timeout failures th
 
 Credentials are entered inside Tawny:
 
-1. Start the application.
+1. Sign in once with Google on first launch. Tawny opens your system browser and returns through a temporary local loopback callback.
 2. Select **Configure providers**.
-3. Enter the values below.
-4. Select **Save credentials**.
+3. Enter the values below and choose **Save credentials**.
 
 | Setting | Used for |
 | --- | --- |
@@ -234,17 +233,19 @@ Credentials are entered inside Tawny:
 | Cloudflare account ID | Workers AI account endpoint |
 | Cloudflare API token | Flux image generation |
 
-Electron `safeStorage` encrypts the credentials in the per-user application data directory. Tawny does not use `.env` files for runtime credentials, does not place keys in renderer storage, and does not write them to logs.
+Electron `safeStorage` encrypts provider credentials and the Firebase refresh session in the per-user application data directory. Tokens never enter renderer storage or logs. Tawny keeps the email/display name for the account affordance, refreshes the Firebase session on launch, and removes the local session when you sign out. On Linux, sign-in requires GNOME Keyring or KDE Wallet; Tawny refuses to save a refresh token with the plaintext fallback backend.
 
 ## Running Tawny
 
 ### Requirements
 
-- Windows 10 or later
+- Windows 10 or later, current macOS, or a current x64 Linux desktop
 - Node.js 22 LTS
 - pnpm
 - A Groq API key
 - A Cloudflare account ID and API token with Workers AI access
+- A Firebase project with Google Authentication enabled and a Google OAuth Desktop client ID
+- Linux X11 plus `xdotool` for automatic copy/paste; Wayland clipboard writes work, but synthetic key injection may be blocked by the compositor
 
 ### Install and develop
 
@@ -271,20 +272,21 @@ pnpm build
 | `pnpm typecheck` | Run strict TypeScript validation |
 | `pnpm test` | Run the Vitest suite |
 | `pnpm build` | Produce main, preload, and renderer bundles |
+| `pnpm package` | Build and package unsigned installers for the current OS |
 | `pnpm preview` | Preview the built Electron/Vite output |
 
 ## Background mode and controls
 
-The first-run page stays visible until **Run in background** is selected. Background mode:
+After Google sign-in, the first-run page stays visible until **Run in background** is selected. Background mode:
 
-- moves Tawny to the Windows tray,
+- moves Tawny to the system tray,
 - registers `Ctrl + Alt + Space`,
 - shows the compact overlay at the top of the active monitor,
 - keeps the overlay above normal windows while a job is active.
 
 | Control | Action |
 | --- | --- |
-| `Ctrl + Alt + Space` | Start recording, stop recording, or confirm/cancel based on state |
+| `Ctrl + Alt + Space` | Start/stop recording or confirm/cancel based on state; Windows also supports hold-to-talk release detection |
 | `Esc` | Cancel the active job |
 | Overlay check button | Finish microphone capture |
 | Tray menu | Show/hide overlay, open settings, open diagnostics, quit |
@@ -303,7 +305,7 @@ Open **Live log** from the main page, **Diagnostics** from the tray, or the cont
 %APPDATA%\Tawny\logs\pipeline.jsonl
 ```
 
-The exact directory is Electron’s `app.getPath("userData")` directory for the current Windows user.
+The exact directory is Electron’s `app.getPath("userData")` directory for the current OS user.
 
 ### Healthy dictation run
 
@@ -345,12 +347,12 @@ state.transition: done
 | Last useful event | Likely problem |
 | --- | --- |
 | No `capture.permission.request` | The job did not enter microphone setup |
-| `capture.failure` | Windows/Electron microphone permission or recorder failure |
+| `capture.failure` | OS/Electron microphone permission or recorder failure |
 | `capture.finalized` with `bytes: 0` | No audio was produced |
 | `provider.failure` for Groq | Missing key, network issue, unsupported response, or Groq error |
 | `gate.result` but no decision event | Routing/intent stage failed |
 | `decision.result: image_generate` but no `image.saved` | Cloudflare credentials, request, timeout, or response validation failure |
-| `image.saved` but no `image.inject.success` | Windows clipboard conversion or simulated paste failed |
+| `image.saved` but no `image.inject.success` | Clipboard conversion or platform paste injection failed |
 | `image.inject.success` but target app is unchanged | Target app rejected simulated `Ctrl+V`, is elevated, or does not accept image clipboard data |
 
 ## Security model
@@ -383,14 +385,35 @@ Run the suite with:
 pnpm test
 ```
 
-## Known Windows limitations
+## Platform limitations
 
-- Simulated `Ctrl+V` can fail for elevated applications, protected fields, or applications that block synthetic input.
+- Simulated paste can fail for elevated applications, protected fields, or applications that block synthetic input. macOS requires microphone permission for recording and may require Accessibility/Automation approval for System Events paste. Linux global shortcuts use the desktop portal on Wayland (approve the first-run prompt); automatic selection/paste uses `xdotool` on X11, while Wayland may deny synthetic keystrokes and require manual paste from the clipboard.
+- Hold-to-talk release detection uses the Windows-native key watcher. On macOS and Linux the global shortcut toggles recording: press once to start and again to stop.
+- An unsigned macOS build cannot use the standard automatic updater. Tawny checks releases and opens the release page for a manual install. Debian package updates are package-manager driven; AppImage can use in-app updates.
 - Tawny currently does not capture and restore the user’s previous clipboard contents.
 - The active target window is inferred from focus behavior; full native HWND capture and elevation reporting remain future hardening work.
 - The renderer receives an image data URL for the short-lived preview. A secure local-file preview protocol would be preferable for very large images.
 - Image intent detection is deliberately local and heuristic. It handles common image verbs, image nouns, and negations, but is not a general natural-language planner.
-- Packaging and clean-machine installer verification are not included in the current development workflow.
+
+## Early preview releases, sign-in, and updates
+
+### Configure Firebase and Google OAuth
+
+Create or choose a Firebase project, register a Firebase Web app, and enable **Google** in Authentication → Sign-in method. In Google Cloud, create an OAuth 2.0 client of type **Desktop app**. The app uses PKCE and opens the system browser; it does not embed Google sign-in in Electron. For the token exchange, Tawny also includes that Desktop client's OAuth secret in the Electron main-process build. Google treats Desktop OAuth credentials as public-client credentials: the secret is recoverable from distributed installers and is not a way to protect a confidential server credential. Never use a Firebase service-account key here. Firebase's provisioned web API key identifies the Firebase project and is not a server secret.
+
+For local development, copy `.env.example` to `.env` and set `TAWNY_FIREBASE_API_KEY`, `TAWNY_FIREBASE_PROJECT_ID`, `TAWNY_GOOGLE_CLIENT_ID`, and `TAWNY_GOOGLE_CLIENT_SECRET` from the same Google **Desktop app** OAuth client. The client ID and secret are injected only into the Electron main-process bundle, not renderer code or logs; the secret remains recoverable from the app binary. Production release builds require GitHub repository secrets with those four exact names so the release binaries can initialize Firebase Authentication. Without them, the release workflow intentionally stops before packaging rather than shipping a non-working sign-in screen.
+
+### Build and publish
+
+Continuous integration runs typecheck, tests, and the Electron build on Windows, macOS, and Linux for pull requests and pushes. To publish a release, update `package.json`'s version, push the matching tag (`v<version>`, for example `v0.2.0`), and wait for **Early preview release**. The workflow builds Windows NSIS, macOS Intel/Apple Silicon DMG and ZIP, and Linux x64 AppImage/DEB artifacts on native runners. It attaches the per-OS install note and a `SHA256SUMS` file to a prerelease titled **Early Preview**. Publishing requires the repository's `GITHUB_TOKEN` plus the four configuration secrets listed above; code-signing certificates are not required.
+
+Install only artifacts from the official [Tawny GitHub Releases](https://github.com/Priyank911/Tawny/releases) page and verify their SHA-256 checksums using [INSTALL-EARLY-PREVIEW.md](./docs/INSTALL-EARLY-PREVIEW.md). Unsigned builds can trigger Windows SmartScreen/Unknown Publisher and macOS Gatekeeper warnings. The note explains the warning and the cautious first-launch steps. A checksum confirms the downloaded bytes match the published file, not the identity of the publisher.
+
+Windows and AppImage Linux check GitHub Releases at launch and periodically, download available updates in the background, and install after the app closes; Tawny displays an in-app and native notification. macOS and Linux DEB installations receive a release notification and a link because unsigned macOS cannot use Electron's automatic installer, and a DEB must be updated by the package manager. The workflow publishes only on version tags, not on every source push, so untagged commits never silently become user updates.
+
+### Diagnostics and reporting
+
+Tawny keeps diagnostics local: startup records app version/platform/auth state (never the email), and auth/update failures add sanitized events to the existing Live log and JSONL file. There is no remote usage analytics or transcript/crash upload. Firebase Crashlytics' documented platforms do not include Electron desktop, so it is not represented as supported reporting. This keeps early-preview troubleshooting useful without silently collecting voice or account data.
 
 ## Repository principles
 

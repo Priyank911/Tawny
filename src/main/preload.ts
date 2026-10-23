@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer } from 'electron';
-import type { OverlaySnapshot, PipelineLog, ProviderSettings } from '../shared/contracts';
+import type { AuthProfile, OverlaySnapshot, PipelineLog, ProviderSettings, UpdateNotice } from '../shared/contracts';
 
 contextBridge.exposeInMainWorld('voiceRouter', {
   getSnapshot: (): Promise<OverlaySnapshot> => ipcRenderer.invoke('overlay:get-snapshot'),
@@ -29,6 +29,27 @@ contextBridge.exposeInMainWorld('voiceRouter', {
     const handler = () => listener();
     ipcRenderer.on('app:background-mode', handler);
     return () => ipcRenderer.removeListener('app:background-mode', handler);
+  },
+  getAuthProfile: (): Promise<AuthProfile | undefined> => ipcRenderer.invoke('auth:get-profile'),
+  signIn: (): Promise<AuthProfile> => ipcRenderer.invoke('auth:sign-in'),
+  cancelSignIn: (): Promise<void> => ipcRenderer.invoke('auth:cancel'),
+  signOut: (): Promise<void> => ipcRenderer.invoke('auth:sign-out'),
+  onAuthProfile: (listener: (profile: AuthProfile | undefined) => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, profile: AuthProfile | undefined) => listener(profile);
+    ipcRenderer.on('auth:profile', handler);
+    return () => ipcRenderer.removeListener('auth:profile', handler);
+  },
+  onAuthRequired: (listener: () => void) => {
+    const handler = () => listener();
+    ipcRenderer.on('auth:required', handler);
+    return () => ipcRenderer.removeListener('auth:required', handler);
+  },
+  openReleasePage: (): Promise<void> => ipcRenderer.invoke('updates:open-release'),
+  installUpdate: (): Promise<void> => ipcRenderer.invoke('updates:install'),
+  onUpdateState: (listener: (notice: UpdateNotice) => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, notice: UpdateNotice) => listener(notice);
+    ipcRenderer.on('updates:state', handler);
+    return () => ipcRenderer.removeListener('updates:state', handler);
   },
   send: (event: 'HOTKEY' | 'STOP' | 'CANCEL' | 'CONFIRM') => ipcRenderer.send('pipeline:event', event),
   subscribe: (listener: (snapshot: OverlaySnapshot) => void) => {

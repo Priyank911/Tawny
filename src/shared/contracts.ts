@@ -79,6 +79,18 @@ export const providerSettingsSchema = z.object({
 });
 export type ProviderSettings = z.infer<typeof providerSettingsSchema>;
 
+export interface AuthProfile {
+  email: string;
+  displayName: string;
+  photoUrl?: string;
+}
+
+export interface UpdateNotice {
+  state: 'available' | 'downloading' | 'ready' | 'manual' | 'error';
+  version?: string;
+  message: string;
+}
+
 export const logLevelSchema = z.enum(['debug', 'info', 'warn', 'error']);
 export type LogLevel = z.infer<typeof logLevelSchema>;
 

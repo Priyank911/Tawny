@@ -1,4 +1,4 @@
-import type { OverlaySnapshot, PipelineLog, ProviderSettings } from '../shared/contracts';
+import type { AuthProfile, OverlaySnapshot, PipelineLog, ProviderSettings, UpdateNotice } from '../shared/contracts';
 
 declare module '*.css';
 
@@ -17,6 +17,15 @@ declare global {
       onOpenLogs: (listener: () => void) => () => void;
       enterBackground: () => Promise<void>;
       onBackgroundMode: (listener: () => void) => () => void;
+      getAuthProfile: () => Promise<AuthProfile | undefined>;
+      signIn: () => Promise<AuthProfile>;
+      cancelSignIn: () => Promise<void>;
+      signOut: () => Promise<void>;
+      onAuthProfile: (listener: (profile: AuthProfile | undefined) => void) => () => void;
+      onAuthRequired: (listener: () => void) => () => void;
+      openReleasePage: () => Promise<void>;
+      installUpdate: () => Promise<void>;
+      onUpdateState: (listener: (notice: UpdateNotice) => void) => () => void;
       send: (event: 'HOTKEY' | 'STOP' | 'CANCEL' | 'CONFIRM') => void;
       subscribe: (listener: (snapshot: OverlaySnapshot) => void) => () => void;
     };

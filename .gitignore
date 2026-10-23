@@ -5,6 +5,8 @@ node_modules/
 out/
 dist/
 dist-electron/
+release/
+release-smoke/
 
 # Local environment and secrets
 .env
@@ -14,6 +16,7 @@ dist-electron/
 *.key
 *.cert
 credentials.bin
+auth-session.bin
 
 # Runtime data and logs
 *.log

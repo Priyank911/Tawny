@@ -1,0 +1,96 @@
+name: Early preview release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Package ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            target: --win nsis --x64
+          - os: macos-latest
+            target: --mac dmg zip --x64 --arm64
+          - os: ubuntu-latest
+            target: --linux AppImage deb --x64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.28.2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Confirm the tag matches the app version
+        run: node scripts/check-release-tag.mjs
+        env:
+          GITHUB_REF_NAME: ${{ github.ref_name }}
+      - name: Require Firebase project configuration
+        run: node scripts/check-release-config.mjs
+        env:
+          TAWNY_FIREBASE_API_KEY: ${{ secrets.TAWNY_FIREBASE_API_KEY }}
+          TAWNY_FIREBASE_PROJECT_ID: ${{ secrets.TAWNY_FIREBASE_PROJECT_ID }}
+          TAWNY_GOOGLE_CLIENT_ID: ${{ secrets.TAWNY_GOOGLE_CLIENT_ID }}
+          TAWNY_GOOGLE_CLIENT_SECRET: ${{ secrets.TAWNY_GOOGLE_CLIENT_SECRET }}
+      - run: pnpm typecheck
+      - run: pnpm test
+      - run: pnpm build
+        env:
+          TAWNY_FIREBASE_API_KEY: ${{ secrets.TAWNY_FIREBASE_API_KEY }}
+          TAWNY_FIREBASE_PROJECT_ID: ${{ secrets.TAWNY_FIREBASE_PROJECT_ID }}
+          TAWNY_GOOGLE_CLIENT_ID: ${{ secrets.TAWNY_GOOGLE_CLIENT_ID }}
+          TAWNY_GOOGLE_CLIENT_SECRET: ${{ secrets.TAWNY_GOOGLE_CLIENT_SECRET }}
+      - name: Verify Firebase config reached the main-process bundle
+        run: node scripts/verify-auth-build.mjs
+      - name: Package unsigned installers
+        run: pnpm exec electron-builder ${{ matrix.target }} --publish never
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ runner.os }}
+          path: |
+            release/*.exe
+            release/*.blockmap
+            release/*.nsis.7z
+            release/*.dmg
+            release/*.zip
+            release/*.deb
+            release/*.AppImage
+            release/latest*.yml
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: Publish early preview release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Create SHA-256 manifest
+        run: node scripts/write-sha256.mjs release-assets
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: Tawny ${{ github.ref_name }} — Early Preview
+          prerelease: true
+          generate_release_notes: true
+          body_path: docs/INSTALL-EARLY-PREVIEW.md
+          files: |
+            release-assets/*
+            docs/INSTALL-EARLY-PREVIEW.md

@@ -19,12 +19,13 @@ describe('Groq Whisper transcription', () => {
     vi.unstubAllGlobals();
   });
 
-  it('reports a segment timeout instead of exposing a generic abort error', async () => {
-    const fetchMock = vi.fn().mockRejectedValueOnce(Object.assign(new Error('aborted'), { name: 'TimeoutError' }));
+  it('retries a segment timeout and reports a recoverable error after the attempt limit', async () => {
+    const fetchMock = vi.fn().mockRejectedValue(Object.assign(new Error('aborted'), { name: 'TimeoutError' }));
     vi.stubGlobal('fetch', fetchMock);
 
     await expect(transcribeWithGroq('groq-token', new Uint8Array([1, 2, 3])))
-      .rejects.toThrow('Groq transcription timed out while processing segment 1 of 1.');
+      .rejects.toThrow('Groq transcription timed out for segment 1 of 1 after 3 attempts.');
+    expect(fetchMock).toHaveBeenCalledTimes(3);
     vi.unstubAllGlobals();
   });
 });

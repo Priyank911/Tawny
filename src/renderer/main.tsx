@@ -1,9 +1,7 @@
 import { StrictMode, useEffect, useMemo, useRef, useState, type ReactElement } from 'react';
 import { createRoot } from 'react-dom/client';
-import { ChevronRight, Image as ImageIcon, LoaderCircle, Sparkles, ScrollText, Settings2, X, Keyboard, ShieldCheck, Code as CodeIcon, FileText as FileTextIcon } from 'lucide-react';
-import type { OverlaySnapshot, PipelineLog, ProviderSettings } from '../shared/contracts';
-// The bundler resolves this side-effect stylesheet import; TypeScript has no CSS module declaration.
-// @ts-expect-error CSS is handled by the renderer bundler.
+import { ChevronRight, Image as ImageIcon, LoaderCircle, Sparkles, ScrollText, Settings2, X, Keyboard, ShieldCheck, Code as CodeIcon, FileText as FileTextIcon, LogOut, UserRound, ExternalLink, Download } from 'lucide-react';
+import type { AuthProfile, OverlaySnapshot, PipelineLog, ProviderSettings, UpdateNotice } from '../shared/contracts';
 import './styles.css';
 
 const RECORDING_SEGMENT_MS = 60_000;
@@ -18,6 +16,11 @@ function App(): ReactElement {
   const [mainPage, setMainPage] = useState(true);
   const [logsOpen, setLogsOpen] = useState(false);
   const [logs, setLogs] = useState<PipelineLog[]>([]);
+  const [authProfile, setAuthProfile] = useState<AuthProfile | undefined>(undefined);
+  const [authBusy, setAuthBusy] = useState(false);
+  const [authError, setAuthError] = useState('');
+  const [accountMenuOpen, setAccountMenuOpen] = useState(false);
+  const [updateNotice, setUpdateNotice] = useState<UpdateNotice | undefined>(undefined);
   const recorderRef = useRef<MediaRecorder | undefined>(undefined);
   const streamRef = useRef<MediaStream | undefined>(undefined);
   const chunksRef = useRef<Blob[]>([]);
@@ -65,21 +68,40 @@ function App(): ReactElement {
   useEffect(() => {
     if (!window.voiceRouter) return undefined;
     void window.voiceRouter.getSnapshot().then(setSnapshot);
-    void window.voiceRouter.getSettings().then(setSettings);
+    void window.voiceRouter.getAuthProfile().then(setAuthProfile).catch(() => setAuthProfile(undefined));
     void window.voiceRouter.getLogs().then(setLogs);
     const unsubscribeSnapshot = window.voiceRouter.subscribe(setSnapshot);
     const unsubscribeSettings = window.voiceRouter.onOpenSettings(() => setSettingsOpen(true));
     const unsubscribeOpenLogs = window.voiceRouter.onOpenLogs(() => setLogsOpen(true));
     const unsubscribeBackground = window.voiceRouter.onBackgroundMode(() => setMainPage(false));
+    const unsubscribeAuth = window.voiceRouter.onAuthProfile(setAuthProfile);
+    const unsubscribeAuthRequired = window.voiceRouter.onAuthRequired(() => {
+      setAuthProfile(undefined);
+      setMainPage(true);
+      setAuthError('Sign in with Google to continue using Tawny.');
+    });
+    const unsubscribeUpdate = window.voiceRouter.onUpdateState(setUpdateNotice);
     const unsubscribeLogs = window.voiceRouter.onLog((entry) => setLogs((current) => [...current.slice(-199), entry]));
     return () => {
       unsubscribeSnapshot();
       unsubscribeSettings();
       unsubscribeOpenLogs();
       unsubscribeBackground();
+      unsubscribeAuth();
+      unsubscribeAuthRequired();
+      unsubscribeUpdate();
       unsubscribeLogs();
     };
   }, []);
+  useEffect(() => {
+    if (!authProfile) {
+      setSettings({ groqApiKey: '', cloudflareAccountId: '', cloudflareApiToken: '' });
+      return;
+    }
+    void window.voiceRouter.getSettings().then(setSettings).catch((error: unknown) => {
+      setAuthError(error instanceof Error ? error.message : 'Provider settings could not be loaded.');
+    });
+  }, [authProfile]);
   useEffect(() => {
     if (state !== 'arming' || recorderRef.current || capturePendingRef.current) return undefined;
     const capture = async (): Promise<void> => {
@@ -231,6 +253,27 @@ function App(): ReactElement {
     window.setTimeout(() => setSaved(false), 2200);
   }
 
+  async function handleGoogleSignIn(): Promise<void> {
+    if (!window.voiceRouter || authBusy) return;
+    setAuthBusy(true);
+    setAuthError('');
+    try {
+      const profile = await window.voiceRouter.signIn();
+      setAuthProfile(profile);
+      setAccountMenuOpen(false);
+    } catch (error) {
+      setAuthError(error instanceof Error ? error.message : 'Google sign-in could not be completed. Check your connection and try again.');
+    } finally {
+      setAuthBusy(false);
+    }
+  }
+
+  async function handleSignOut(): Promise<void> {
+    await window.voiceRouter?.signOut();
+    setAccountMenuOpen(false);
+    setMainPage(true);
+  }
+
   return (
     <main className={`app-shell state-${state} ${mainPage ? 'main-page' : 'overlay-page'}`}>
       {mainPage ? (
@@ -252,16 +295,16 @@ function App(): ReactElement {
               <span className="eyebrow">PRIVATE DESKTOP VOICE LAYER</span>
               <h1>Speak naturally.<br /><em>Work precisely.</em></h1>
               <p>Tawny listens for your shortcut, understands what you mean, and returns the result to the app already in focus.</p>
-              <div className="welcome-actions">
+              {authProfile ? <div className="welcome-actions">
                 <button className="launch-button" onClick={() => { setMainPage(false); void window.voiceRouter?.enterBackground(); }}>
                   Run in background <KeyboardIcon />
                 </button>
                 <button className="secondary-button" onClick={() => setSettingsOpen(true)}>
                   <SettingsIcon /> Configure providers
                 </button>
-              </div>
+              </div> : <p className="signin-trust-note"><ShieldCheck size={14} /> Sign in once on this device. Your Firebase session is kept in secure system storage.</p>}
             </div>
-            <div className="welcome-preview">
+            {authProfile ? <div className="welcome-preview">
               <div className="preview-orbit orbit-one" />
               <div className="preview-orbit orbit-two" />
               <div className="preview-card">
@@ -269,8 +312,40 @@ function App(): ReactElement {
                 <strong>Ready when you are</strong>
                 <span>Ctrl + Alt + Space</span>
               </div>
-            </div>
+            </div> : <div className="signin-column">
+              <div className="signin-card">
+                <div className="signin-wave" aria-hidden="true"><span /><span /><span /><span /><span /><span /><span /></div>
+                <p className="eyebrow">YOUR VOICE, YOUR WORKSPACE</p>
+                <h2>Sign in to Tawny</h2>
+                <p className="signin-description">Use your Google account to unlock your desktop voice assistant.</p>
+                <button className="google-signin-button" onClick={() => void handleGoogleSignIn()} disabled={authBusy}>
+                  {authBusy ? <LoaderCircle className="signin-spinner" size={17} /> : <GoogleMark />}
+                  {authBusy ? 'Waiting for Google…' : 'Continue with Google'}
+                  {!authBusy && <ExternalLink size={14} className="signin-external-icon" />}
+                </button>
+                {authBusy && <button className="signin-cancel" onClick={() => { void window.voiceRouter?.cancelSignIn(); setAuthBusy(false); }}>Cancel sign-in</button>}
+                {authError && <p className="signin-error" role="alert">{authError}</p>}
+                <p className="signin-footnote"><ShieldCheck size={13} /> Google handles your password. Tawny stores only an encrypted Firebase session.</p>
+              </div>
+            </div>}
           </section>
+          {authProfile && <div className="account-anchor">
+            <button className="account-button" title={authProfile.email} aria-label={`Account: ${authProfile.email}`} aria-expanded={accountMenuOpen} onClick={() => setAccountMenuOpen((open) => !open)}>
+              <span className="account-avatar">{authProfile.displayName.slice(0, 1).toUpperCase()}</span>
+              <span className="account-hover-email">{authProfile.email}</span>
+            </button>
+            {accountMenuOpen && <div className="account-menu" role="menu">
+              <span className="account-menu-label">SIGNED IN AS</span>
+              <strong>{authProfile.email}</strong>
+              <button role="menuitem" onClick={() => void handleSignOut()}><LogOut size={14} /> Sign out</button>
+            </div>}
+          </div>}
+          {updateNotice && <aside className={`update-notice update-${updateNotice.state}`} role="status">
+            <div className="update-notice-icon"><Download size={15} /></div>
+            <div className="update-notice-copy"><strong>{updateNotice.state === 'ready' ? 'Update ready' : updateNotice.state === 'error' ? 'Update check' : 'Early preview update'}</strong><span>{updateNotice.message}</span></div>
+            {(updateNotice.state === 'manual' || updateNotice.state === 'ready') && <button className="update-action" onClick={() => void (updateNotice.state === 'ready' ? window.voiceRouter?.installUpdate() : window.voiceRouter?.openReleasePage())}>{updateNotice.state === 'ready' ? 'Restart' : 'View release'}</button>}
+            <button className="update-dismiss" aria-label="Dismiss update notice" onClick={() => setUpdateNotice(undefined)}><X size={14} /></button>
+          </aside>}
         </>
       ) : (
         <div className="tawny-overlay-wrapper">
@@ -378,6 +453,15 @@ function KeyboardIcon(): ReactElement {
 
 function SettingsIcon(): ReactElement {
   return <Settings2 size={13} aria-hidden="true" />;
+}
+
+function GoogleMark(): ReactElement {
+  return <svg className="google-mark" viewBox="0 0 48 48" aria-hidden="true">
+    <path fill="#EA4335" d="M24 9.5c3.5 0 6.6 1.2 9.1 3.6l6.8-6.8C35.8 2.4 30.4 0 24 0 14.7 0 6.6 5.3 2.7 13.1l7.9 6.1C12.5 13.6 17.8 9.5 24 9.5Z" />
+    <path fill="#4285F4" d="M46.1 24.5c0-1.6-.1-3.1-.4-4.5H24v9h12.4c-.6 2.9-2.2 5.3-4.7 6.9l7.6 5.9c4.4-4.1 6.8-10.1 6.8-17.3Z" />
+    <path fill="#FBBC05" d="M10.6 28.8c-.5-1.5-.8-3.1-.8-4.8s.3-3.3.8-4.8l-7.9-6.1C1 16.4 0 20.1 0 24s1 7.6 2.7 10.9l7.9-6.1Z" />
+    <path fill="#34A853" d="M24 48c6.4 0 11.8-2.1 15.7-6.2l-7.6-5.9c-2.1 1.4-4.8 2.3-8.1 2.3-6.2 0-11.5-4.1-13.4-9.7l-7.9 6.1C6.6 42.7 14.7 48 24 48Z" />
+  </svg>;
 }
 
 createRoot(document.getElementById('root')!).render(<StrictMode><App /></StrictMode>);
