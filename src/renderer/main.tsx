@@ -2,6 +2,8 @@ import { StrictMode, useEffect, useMemo, useRef, useState, type ReactElement } f
 import { createRoot } from 'react-dom/client';
 import { ChevronRight, Image as ImageIcon, LoaderCircle, Sparkles, ScrollText, Settings2, X, Keyboard, ShieldCheck, Code as CodeIcon, FileText as FileTextIcon } from 'lucide-react';
 import type { OverlaySnapshot, PipelineLog, ProviderSettings } from '../shared/contracts';
+// The bundler resolves this side-effect stylesheet import; TypeScript has no CSS module declaration.
+// @ts-expect-error CSS is handled by the renderer bundler.
 import './styles.css';
 
 const RECORDING_SEGMENT_MS = 60_000;
