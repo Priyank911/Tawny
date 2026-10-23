@@ -1,6 +1,6 @@
 {
   "name": "voicerouter",
-  "version": "0.1.2",
+  "version": "0.1.4",
   "private": true,
   "description": "A resilient desktop voice assistant for Windows, macOS, and Linux.",
   "author": "Tawny",
