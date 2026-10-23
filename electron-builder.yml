@@ -49,6 +49,7 @@ mac:
     NSAppleEventsUsageDescription: Tawny uses System Events to paste dictated and generated text into the app you are using.
   artifactName: Tawny-${version}-mac-${arch}.${ext}
 linux:
+  maintainer: "Tawny <developer.priyank0911@gmail.com>"
   icon: tawny-mark.svg
   syncDesktopName: true
   target:
