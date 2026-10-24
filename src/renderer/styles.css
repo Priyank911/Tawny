@@ -645,10 +645,11 @@ button {
 .hotkey-status-copy, .hotkey-error, .hotkey-saved { margin: 0; color: #64748b; font-size: 9px; line-height: 1.4; }
 .hotkey-error { color: #b42318; }
 .hotkey-saved { color: #15803d; }
-.hotkey-test-result { margin: 0; padding: 7px 9px; border-radius: 8px; color: #475569; background: #eef2f6; font-size: 9px; line-height: 1.4; }
-.hotkey-test-result.is-waiting { color: #475569; background: #eef2f6; }
-.hotkey-test-result.is-passed { color: #166534; background: #dcfce7; }
-.hotkey-test-result.is-failed { color: #9f2d24; background: #fff1ef; }
+.hotkey-feedback { display: flex; align-items: flex-start; gap: 7px; margin: 0; padding: 8px 10px; border-radius: 9px; font-size: 9px; line-height: 1.45; }
+.hotkey-feedback svg { flex: none; margin-top: 1px; }
+.hotkey-feedback.is-waiting { color: #475569; background: #eef2f6; }
+.hotkey-feedback.is-success { color: #166534; background: #dcfce7; }
+.hotkey-feedback.is-error { color: #9f2d24; background: #fff1ef; }
 .compositor-command { align-items: flex-end; padding-top: 9px; border-top: 1px solid #e2e8f0; }
 .compositor-command code { display: block; max-width: 360px; overflow: hidden; margin-top: 4px; color: #475569; font: 9px "DM Mono", monospace; text-overflow: ellipsis; white-space: nowrap; }
 .status-dot-warning { background: #d97706 !important; box-shadow: 0 0 0 4px rgba(217, 119, 6, .12) !important; }

@@ -48,6 +48,8 @@ let activeShortcut = DEFAULT_GLOBAL_SHORTCUT;
 let shortcutRegistered = false;
 let lastHotkeyTimestamp = 0;
 let pendingShortcutTest: { resolve: (result: HotkeyTestResult) => void; timer: NodeJS.Timeout } | undefined;
+let settingsReturnState: { background: boolean; bounds: { x: number; y: number; width: number; height: number }; visible: boolean } | undefined;
+let rendererRecoveryUsed = false;
 const isWayland = isWaylandSession(process.platform, process.env);
 const updateNotificationsShown = new Set<string>();
 let pendingCliTrigger = process.argv.includes('--trigger');
@@ -217,6 +219,28 @@ function createWindow(): void {
   mainWindow.on('blur', () => {
     if (backgroundMode && snapshot.state === 'idle') mainWindow?.hide();
   });
+  mainWindow.on('unresponsive', () => {
+    logPipeline({ level: 'warn', event: 'renderer.unresponsive', message: 'The Tawny window stopped responding; waiting for Electron to recover it.' });
+  });
+  mainWindow.on('responsive', () => {
+    logPipeline({ event: 'renderer.responsive', message: 'The Tawny window is responding again.' });
+  });
+  mainWindow.webContents.on('render-process-gone', (_event, details) => {
+    logPipeline({
+      level: 'error',
+      event: 'renderer.process.gone',
+      message: `The Tawny renderer exited (${details.reason}, code ${details.exitCode}).`,
+      data: { reason: details.reason, exitCode: String(details.exitCode) }
+    });
+    if (rendererRecoveryUsed || quitting) return;
+    rendererRecoveryUsed = true;
+    const windowRef = mainWindow;
+    setTimeout(() => {
+      if (!windowRef || windowRef.isDestroyed() || windowRef.webContents.isDestroyed() || quitting) return;
+      logPipeline({ level: 'warn', event: 'renderer.recovery', message: 'Reloading Tawny once after a renderer crash.' });
+      windowRef.webContents.reload();
+    }, 800);
+  });
   if (process.env.ELECTRON_RENDERER_URL) mainWindow.loadURL(process.env.ELECTRON_RENDERER_URL);
   else mainWindow.loadFile(join(__dirname, '../renderer/index.html'));
 }
@@ -278,12 +302,39 @@ function enterBackground(): void {
 
 function openSettings(): void {
   if (!mainWindow) return;
-  mainWindow.setSize(560, 520);
+  settingsReturnState = {
+    background: backgroundMode,
+    bounds: mainWindow.getBounds(),
+    visible: mainWindow.isVisible()
+  };
+  const display = screen.getDisplayMatching(mainWindow.getBounds());
+  const width = Math.min(760, display.workAreaSize.width);
+  const height = Math.min(680, display.workAreaSize.height);
+  backgroundMode = false;
+  mainWindow.setSkipTaskbar(false);
+  mainWindow.setResizable(true);
+  mainWindow.setSize(width, height);
   mainWindow.setFocusable(true);
   mainWindow.setAlwaysOnTop(false);
   mainWindow.center();
   mainWindow.show();
   mainWindow.webContents.send('settings:open');
+}
+
+function closeSettingsWindow(): void {
+  const previous = settingsReturnState;
+  settingsReturnState = undefined;
+  if (!mainWindow || !previous) return;
+  if (previous.background) {
+    enterBackground();
+    return;
+  }
+  mainWindow.setBounds(previous.bounds);
+  mainWindow.setSkipTaskbar(false);
+  mainWindow.setFocusable(true);
+  mainWindow.setAlwaysOnTop(false);
+  if (previous.visible) mainWindow.show();
+  else mainWindow.hide();
 }
 
 function openLogs(): void {
@@ -396,9 +447,10 @@ actor.subscribe((state) => {
   });
   setEscapeShortcut(state.value !== 'idle');
   mainWindow?.webContents.send('overlay:update', snapshot);
-  if (state.value === 'idle' && mainWindow?.isVisible()) {
+  if (state.value === 'idle' && backgroundMode && mainWindow?.isVisible()) {
     const windowRef = mainWindow;
     setTimeout(() => {
+      if (!backgroundMode || snapshot.state !== 'idle' || !windowRef.isVisible()) return;
       if (windowRef.getSize()[1] !== OVERLAY_HEIGHT) windowRef.setSize(OVERLAY_WIDTH, OVERLAY_HEIGHT);
       windowRef.hide();
     }, 450);
@@ -511,6 +563,7 @@ ipcMain.handle('settings:get', () => {
   if (!authProfile) throw new Error('Sign in with Google before opening provider settings.');
   return readProviderSettings();
 });
+ipcMain.handle('settings:close', () => closeSettingsWindow());
 ipcMain.handle('settings:save', async (_event, settings) => {
   if (!authProfile) throw new Error('Sign in with Google before saving provider settings.');
   await saveProviderSettings(settings);

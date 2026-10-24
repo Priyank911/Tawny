@@ -45,11 +45,8 @@ function App(): ReactElement {
   const [hotkeyStatus, setHotkeyStatus] = useState<HotkeyStatus>({ accelerator: DEFAULT_SHORTCUT, registered: false, wayland: false, message: 'Checking shortcut registration…' });
   const [hotkeyDraft, setHotkeyDraft] = useState(DEFAULT_SHORTCUT);
   const [recordingHotkey, setRecordingHotkey] = useState(false);
-  const [hotkeySaved, setHotkeySaved] = useState(false);
   const [hotkeyTestState, setHotkeyTestState] = useState<'idle' | 'waiting' | 'passed' | 'failed'>('idle');
-  const [hotkeyTestMessage, setHotkeyTestMessage] = useState('');
-  const [commandCopied, setCommandCopied] = useState(false);
-  const [hotkeyError, setHotkeyError] = useState('');
+  const [hotkeyFeedback, setHotkeyFeedback] = useState<{ state: 'success' | 'error' | 'waiting'; message: string } | undefined>(undefined);
   const [installingUpdate, setInstallingUpdate] = useState(false);
   const recorderRef = useRef<MediaRecorder | undefined>(undefined);
   const streamRef = useRef<MediaStream | undefined>(undefined);
@@ -287,6 +284,11 @@ function App(): ReactElement {
 
   const isListening = state === 'recording' || state === 'arming';
   const isBusy = ['transcribing', 'gating', 'deciding', 'handling', 'injecting', 'finalizing'].includes(state);
+  function closeSettingsPanel(): void {
+    setSettingsOpen(false);
+    void window.voiceRouter?.closeSettings();
+  }
+
   async function saveSettings(): Promise<void> {
     if (!window.voiceRouter) return;
     await window.voiceRouter.saveSettings(settings);
@@ -299,7 +301,7 @@ function App(): ReactElement {
     if (event.key === 'Escape') {
       void window.voiceRouter?.setHotkeyCaptureMode(false);
       setRecordingHotkey(false);
-      setHotkeyError('Shortcut change cancelled.');
+      setHotkeyFeedback({ state: 'error', message: 'Shortcut change cancelled.' });
       return;
     }
     const accelerator = acceleratorFromKeyEvent(event);
@@ -307,77 +309,73 @@ function App(): ReactElement {
       if (!['Control', 'Alt', 'Shift', 'Meta'].includes(event.key)) {
         void window.voiceRouter?.setHotkeyCaptureMode(false);
         setRecordingHotkey(false);
-        setHotkeyError('Use at least one modifier and one non-modifier key.');
+        setHotkeyFeedback({ state: 'error', message: 'Use at least one modifier and one non-modifier key.' });
       }
       return;
     }
     void window.voiceRouter?.setHotkeyCaptureMode(false);
     setHotkeyDraft(accelerator);
     setRecordingHotkey(false);
-    setHotkeyError('');
-    setHotkeySaved(false);
+    setHotkeyFeedback(undefined);
     setHotkeyTestState('idle');
-    setHotkeyTestMessage('');
-    setCommandCopied(false);
   }
 
   async function saveShortcut(): Promise<void> {
-    setHotkeyError('');
-    setHotkeySaved(false);
+    setHotkeyFeedback(undefined);
     setHotkeyTestState('idle');
-    setHotkeyTestMessage('');
-    setCommandCopied(false);
     try {
       await window.voiceRouter?.setHotkeyCaptureMode(false);
       const status = await window.voiceRouter?.saveHotkey(hotkeyDraft);
       if (!status) return;
       setHotkeyStatus(status);
       setHotkeyDraft(status.accelerator);
-      setHotkeySaved(true);
       setHotkeyTestState('idle');
-      setHotkeyTestMessage('');
+      setHotkeyFeedback({
+        state: status.registered ? 'success' : 'error',
+        message: status.registered ? 'Shortcut saved. Use Test key to confirm it triggers.' : 'Shortcut saved, but the system did not confirm registration. Test it or follow the setup hint above.'
+      });
     } catch (error) {
-      setHotkeyError(error instanceof Error ? error.message : 'Shortcut could not be saved.');
+      setHotkeyFeedback({ state: 'error', message: error instanceof Error ? error.message : 'Shortcut could not be saved.' });
     }
   }
 
   async function testShortcut(): Promise<void> {
-    setHotkeyError('');
+    setHotkeyFeedback(undefined);
     setHotkeyTestState('waiting');
-    setHotkeyTestMessage(`Press ${displayShortcut(hotkeyStatus.accelerator)} now. Waiting up to 10 seconds…`);
+    setHotkeyFeedback({ state: 'waiting', message: `Press ${displayShortcut(hotkeyStatus.accelerator)} now…` });
     try {
       const result = await window.voiceRouter?.testHotkey();
       if (!result) {
         setHotkeyTestState('failed');
-        setHotkeyTestMessage('The shortcut test could not start.');
+        setHotkeyFeedback({ state: 'error', message: 'The shortcut test could not start.' });
         return;
       }
       setHotkeyTestState(result.success ? 'passed' : 'failed');
-      setHotkeyTestMessage(result.message);
+      setHotkeyFeedback({ state: result.success ? 'success' : 'error', message: result.message });
     } catch (error) {
       setHotkeyTestState('failed');
-      setHotkeyTestMessage(error instanceof Error ? error.message : 'The shortcut test failed.');
+      const message = error instanceof Error ? error.message : 'The shortcut test failed.';
+      setHotkeyFeedback({ state: 'error', message });
     }
   }
 
   async function beginShortcutCapture(): Promise<void> {
-    setHotkeyError('');
+    setHotkeyFeedback(undefined);
     try {
       await window.voiceRouter?.setHotkeyCaptureMode(true);
       setRecordingHotkey(true);
     } catch (error) {
-      setHotkeyError(error instanceof Error ? error.message : 'Shortcut capture could not start.');
+      setHotkeyFeedback({ state: 'error', message: error instanceof Error ? error.message : 'Shortcut capture could not start.' });
     }
   }
 
   async function copyCompositorCommand(): Promise<void> {
-    setHotkeyError('');
+    setHotkeyFeedback(undefined);
     try {
       await window.voiceRouter?.copyCompositorCommand();
-      setCommandCopied(true);
-      window.setTimeout(() => setCommandCopied(false), 2200);
+      setHotkeyFeedback({ state: 'success', message: 'Compositor command copied.' });
     } catch (error) {
-      setHotkeyError(error instanceof Error ? error.message : 'The compositor command could not be copied.');
+      setHotkeyFeedback({ state: 'error', message: error instanceof Error ? error.message : 'The compositor command could not be copied.' });
     }
   }
 
@@ -561,9 +559,9 @@ function App(): ReactElement {
           </div>
         </div>
       )}
-      {settingsOpen && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.currentTarget === event.target) setSettingsOpen(false); }}>
+      {settingsOpen && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.currentTarget === event.target) closeSettingsPanel(); }}>
         <section className="settings-panel" role="dialog" aria-modal="true" aria-labelledby="settings-title">
-          <div className="settings-heading"><div><p className="eyebrow">TAWNY / SETTINGS</p><h2 id="settings-title">Connect your providers</h2><p>Keys are encrypted with Windows secure storage and never written to logs.</p></div><button className="close-button" onClick={() => setSettingsOpen(false)} aria-label="Close settings"><X size={17} /></button></div>
+          <div className="settings-heading"><div><p className="eyebrow">TAWNY / SETTINGS</p><h2 id="settings-title">Connect your providers</h2><p>Keys are encrypted with Windows secure storage and never written to logs.</p></div><button className="close-button" onClick={closeSettingsPanel} aria-label="Close settings"><X size={17} /></button></div>
           <section className="hotkey-settings" aria-labelledby="hotkey-title">
             <div className="hotkey-settings-heading"><div><span id="hotkey-title">Recording shortcut</span><small>Choose the key combination Tawny listens for.</small></div><span className={`hotkey-state ${hotkeyStatus.registered ? 'is-registered' : 'needs-compositor'}`}>{hotkeyStatus.registered ? 'Registered' : hotkeyStatus.wayland ? 'Compositor setup' : 'Not registered'}</span></div>
             <div className="hotkey-controls">
@@ -575,10 +573,10 @@ function App(): ReactElement {
             {recordingHotkey && <button className="hotkey-capture" onKeyDown={captureShortcut} onBlur={() => { setRecordingHotkey(false); void window.voiceRouter?.setHotkeyCaptureMode(false); }} autoFocus>Press your shortcut now · Esc cancels</button>}
             <p className="hotkey-status-copy" role="status">{hotkeyStatus.message}</p>
             {hotkeyStatus.wayland && hotkeyStatus.compositorCommand && <div className="compositor-command"><div><span>Wayland fallback command</span><small>Bind this in your compositor’s keyboard-shortcut settings if the portal shortcut doesn’t trigger.</small><code title={hotkeyStatus.compositorCommand}>{hotkeyStatus.compositorCommand}</code></div><button className="hotkey-secondary" onClick={() => void copyCompositorCommand()}>Copy</button></div>}
-            {hotkeyTestMessage && <p className={`hotkey-test-result is-${hotkeyTestState}`} role="status">{hotkeyTestMessage}</p>}
-            {hotkeyError && <p className="hotkey-error" role="alert">{hotkeyError}</p>}
-            {hotkeySaved && !hotkeyError && <p className="hotkey-saved" role="status">Shortcut saved on this device.</p>}
-            {commandCopied && !hotkeyError && <p className="hotkey-saved" role="status">Compositor command copied.</p>}
+            {hotkeyFeedback && <p className={`hotkey-feedback is-${hotkeyFeedback.state}`} role={hotkeyFeedback.state === 'error' ? 'alert' : 'status'}>
+              {hotkeyFeedback.state === 'waiting' ? <LoaderCircle size={12} className="signin-spinner" /> : hotkeyFeedback.state === 'success' ? <ShieldCheck size={12} /> : <X size={12} />}
+              <span>{hotkeyFeedback.message}</span>
+            </p>}
           </section>
           <div className="settings-grid">
             {([

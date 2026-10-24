@@ -9,6 +9,7 @@ declare global {
       getLogs: () => Promise<PipelineLog[]>;
       onLog: (listener: (entry: PipelineLog) => void) => () => void;
       getSettings: () => Promise<ProviderSettings>;
+      closeSettings: () => Promise<void>;
       saveSettings: (settings: ProviderSettings) => Promise<void>;
       getHotkey: () => Promise<HotkeyStatus>;
       setHotkeyCaptureMode: (enabled: boolean) => Promise<void>;
