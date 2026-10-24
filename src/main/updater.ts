@@ -8,6 +8,8 @@ const RELEASES_API = 'https://api.github.com/repos/Priyank911/Tawny/releases?per
 const listeners = new Set<(notice: UpdateNotice) => void>();
 let started = false;
 let updaterInstance: AppUpdater | undefined;
+let downloadedUpdateReady = false;
+let lastProgressBucket = -1;
 
 function emit(notice: UpdateNotice): void {
   for (const listener of listeners) listener(notice);
@@ -16,6 +18,10 @@ function emit(notice: UpdateNotice): void {
 export function onUpdateAvailable(listener: (notice: UpdateNotice) => void): () => void {
   listeners.add(listener);
   return () => listeners.delete(listener);
+}
+
+export function isDownloadedUpdateReady(): boolean {
+  return downloadedUpdateReady;
 }
 
 export async function openLatestReleasePage(): Promise<void> {
@@ -101,21 +107,29 @@ export async function initializeUpdateService(): Promise<AppUpdater | undefined>
     logPipeline({ event: 'update.check.start', message: 'Checking GitHub Releases for an early-preview update.' });
   });
   autoUpdater.on('update-available', (info) => {
+    downloadedUpdateReady = false;
+    lastProgressBucket = -1;
     const version = info.version;
     logPipeline({ event: 'update.available', message: `Early preview ${version} is available and will download in the background.` });
     emit({ state: 'available', version, message: `Early preview ${version} is available. Downloading in the background.` });
   });
   autoUpdater.on('download-progress', (progress) => {
+    const bucket = Math.min(100, Math.floor(progress.percent / 5) * 5);
+    if (bucket <= lastProgressBucket && progress.percent < 100) return;
+    lastProgressBucket = bucket;
     emit({ state: 'downloading', message: `Downloading update: ${Math.round(progress.percent)}%.` });
   });
   autoUpdater.on('update-downloaded', (info) => {
+    downloadedUpdateReady = true;
     logPipeline({ event: 'update.downloaded', message: `Early preview ${info.version} downloaded and will install when Tawny closes.` });
     emit({ state: 'ready', version: info.version, message: `Early preview ${info.version} is ready. Close Tawny to install it.` });
   });
   autoUpdater.on('update-not-available', () => {
+    downloadedUpdateReady = false;
     logPipeline({ event: 'update.current', message: 'Tawny is using the latest early-preview release.' });
   });
   autoUpdater.on('error', () => {
+    downloadedUpdateReady = false;
     logPipeline({ level: 'warn', event: 'update.check.failure', message: 'The automatic update could not be completed.' });
   });
 

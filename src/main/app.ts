@@ -1,4 +1,4 @@
-import { app, BrowserWindow, globalShortcut, ipcMain, Menu, nativeImage, Notification, screen, session, Tray } from 'electron';
+import { app, BrowserWindow, clipboard, globalShortcut, ipcMain, Menu, nativeImage, Notification, screen, session, Tray } from 'electron';
 import { join } from 'node:path';
 import { writeFile } from 'node:fs/promises';
 import { createActor } from 'xstate';
@@ -6,7 +6,7 @@ import { pipelineMachine } from './pipeline/machine';
 import { gateTranscript } from './pipeline/gate';
 import { isExplicitTextQueryRequest, isFastRewriteRequest, isImageGenerationRequest, isTextRewriteRequest, stripFastRewritePrefix } from './pipeline/intent';
 import { captureSelectedText, pasteImage, pasteText } from './inject';
-import { PipelineError, type AuthProfile, type OverlaySnapshot, type UpdateNotice } from '../shared/contracts';
+import { PipelineError, type AuthProfile, type HotkeyStatus, type HotkeyTestResult, type OverlaySnapshot, type UpdateNotice } from '../shared/contracts';
 import { readProviderSettings, saveProviderSettings } from './settings';
 import { generateWithCloudflareFlux } from './providers/cloudflareFlux';
 import { transcribeWithGroq } from './providers/groqWhisper';
@@ -19,8 +19,10 @@ import {
 import { getRecentLogs, logPipeline, setLogSink } from './logger';
 import { startKeyWatcher, watchKeyRelease, cancelKeyReleaseWatch, makeWindowTopmost, stopKeyWatcher } from './keywatcherService';
 import { cancelGoogleSignIn, getAuthProfile, setAuthSessionInvalidatedHandler, signOut, startGoogleSignIn } from './auth';
-import { initializeUpdateService, onUpdateAvailable, openLatestReleasePage } from './updater';
+import { initializeUpdateService, isDownloadedUpdateReady, onUpdateAvailable, openLatestReleasePage } from './updater';
 import { linuxPasswordStorePreference } from './linuxKeyring';
+import { DEFAULT_GLOBAL_SHORTCUT, buildCompositorTriggerCommand, isWaylandSession, normalizeGlobalShortcut } from './hotkeyConfig';
+import { readGlobalShortcut, writeGlobalShortcut } from './hotkeyPreferences';
 
 const linuxPasswordStore = linuxPasswordStorePreference(
   process.platform,
@@ -42,16 +44,146 @@ let routingTimer: NodeJS.Timeout | undefined;
 let stopPending = false;
 let pendingSelectedTextPromise: Promise<string> | undefined;
 let authProfile: AuthProfile | undefined;
+let activeShortcut = DEFAULT_GLOBAL_SHORTCUT;
+let shortcutRegistered = false;
+let lastHotkeyTimestamp = 0;
+let pendingShortcutTest: { resolve: (result: HotkeyTestResult) => void; timer: NodeJS.Timeout } | undefined;
+const isWayland = isWaylandSession(process.platform, process.env);
+const updateNotificationsShown = new Set<string>();
+let pendingCliTrigger = process.argv.includes('--trigger');
 const hasSingleInstanceLock = app.requestSingleInstanceLock();
 
 if (!hasSingleInstanceLock) {
   app.quit();
 } else {
-  app.on('second-instance', () => {
+  app.on('second-instance', (_event, argv) => {
+    if (argv.includes('--trigger')) {
+      if (mainWindow) handleShortcutTrigger();
+      else pendingCliTrigger = true;
+      return;
+    }
     if (!mainWindow) return;
     showOverlay();
     mainWindow.focus();
   });
+}
+
+function handleShortcutTrigger(): void {
+  if (!mainWindow) return;
+  if (pendingShortcutTest) {
+    const test = pendingShortcutTest;
+    pendingShortcutTest = undefined;
+    clearTimeout(test.timer);
+    const message = `Shortcut ${activeShortcut} triggered Tawny successfully.`;
+    logPipeline({ event: 'hotkey.test.passed', message, data: { accelerator: activeShortcut, wayland: String(isWayland) } });
+    test.resolve({ success: true, message });
+    return;
+  }
+  const now = Date.now();
+  if (now - lastHotkeyTimestamp < 400) return;
+  lastHotkeyTimestamp = now;
+
+  if (!authProfile) {
+    mainWindow.show();
+    mainWindow.focus();
+    mainWindow.webContents.send('auth:required');
+    return;
+  }
+
+  if (snapshot.state === 'idle' || snapshot.state === 'done' || snapshot.state === 'failed' || snapshot.state === 'cancelled') {
+    stopPending = false;
+    activeJobId = `job-${Date.now().toString(36)}`;
+    snapshot = { ...snapshot, imageDataUrl: undefined, message: undefined, intent: undefined };
+    pendingSelectedTextPromise = captureSelectedText().catch(() => '');
+    logPipeline({ event: 'hotkey.start', message: `Shortcut ${activeShortcut} received; starting audio capture.`, jobId: activeJobId, stage: 'capture' });
+    actor.send({ type: 'HOTKEY' });
+    showOverlay();
+
+    const captureStartTime = Date.now();
+    if (process.platform === 'win32') watchKeyRelease(() => {
+      if (Date.now() - captureStartTime >= 600) {
+        logPipeline({ event: 'hotkey.release', message: 'Shortcut released; finalizing capture.', jobId: activeJobId, stage: 'capture' });
+        stopRecording();
+      }
+    });
+
+    readyTimer = setTimeout(() => {
+      logPipeline({ event: 'capture.ready', message: 'Capture window is ready for audio.', jobId: activeJobId, stage: 'capture' });
+      actor.send({ type: 'AUDIO_READY' });
+      if (stopPending) stopRecording();
+    }, 160);
+  } else if (snapshot.state === 'recording') {
+    logPipeline({ event: 'hotkey.stop', message: 'Global shortcut toggle received; stopping capture.', jobId: activeJobId, stage: 'capture' });
+    stopRecording();
+  } else if (snapshot.state === 'confirming') {
+    logPipeline({ event: 'hotkey.confirm', message: 'Global shortcut received; confirming action.', jobId: activeJobId, stage: 'decide' });
+    actor.send({ type: 'CONFIRM' });
+  } else {
+    logPipeline({ event: 'hotkey.cancel', message: 'Global shortcut received; cancelling active job.', jobId: activeJobId, errorClass: 'cancelled' });
+    actor.send({ type: 'CANCEL' });
+  }
+}
+
+function getCompositorCommand(): string | undefined {
+  if (!isWayland) return undefined;
+  const executable = process.env.APPIMAGE || process.execPath;
+  return buildCompositorTriggerCommand(executable, app.isPackaged ? undefined : app.getAppPath());
+}
+
+function createHotkeyStatus(accelerator = activeShortcut): HotkeyStatus {
+  return {
+    accelerator,
+    registered: shortcutRegistered && globalShortcut.isRegistered(accelerator),
+    wayland: isWayland,
+    compositorCommand: getCompositorCommand(),
+    message: shortcutRegistered && globalShortcut.isRegistered(accelerator)
+      ? isWayland ? 'Electron reports the portal binding active. Use the compositor command below if the key still does not trigger.' : 'Shortcut registration is confirmed by Electron.'
+      : isWayland ? 'The desktop portal did not confirm this shortcut. Bind the command below in your compositor settings.' : 'Shortcut could not be registered. Choose another combination or check for a shortcut conflict.'
+  };
+}
+
+async function installUpdateFromNotice(): Promise<void> {
+  if (process.platform === 'darwin' || (process.platform === 'linux' && !process.env.APPIMAGE)) {
+    await openLatestReleasePage();
+    return;
+  }
+  const updater = await initializeUpdateService();
+  if (!updater || !isDownloadedUpdateReady()) throw new Error('The update is not fully downloaded yet. Wait for the download to finish, then try again.');
+  quitting = true;
+  try {
+    updater.quitAndInstall(false, true);
+  } catch (error) {
+    quitting = false;
+    throw error;
+  }
+}
+
+function registerGlobalShortcut(accelerator: string): HotkeyStatus {
+  if (shortcutRegistered) globalShortcut.unregister(activeShortcut);
+  activeShortcut = accelerator;
+  shortcutRegistered = false;
+  try {
+    const accepted = globalShortcut.register(accelerator, handleShortcutTrigger);
+    shortcutRegistered = accepted && globalShortcut.isRegistered(accelerator);
+  } catch (error) {
+    logPipeline({ level: 'warn', event: 'hotkey.register.failure', message: error instanceof Error ? error.message : `Could not register ${accelerator}.` });
+  }
+  const status = createHotkeyStatus(accelerator);
+  if (status.registered) {
+    logPipeline({ event: 'hotkey.registered', message: `Electron confirmed shortcut registration for ${accelerator}.`, data: { accelerator, platform: process.platform } });
+  } else {
+    logPipeline({ level: 'warn', event: 'hotkey.register.failure', message: status.message, errorClass: 'environment', data: { accelerator, platform: process.platform, wayland: String(isWayland) } });
+  }
+  return status;
+}
+
+function notifyClipboardOnly(kind: 'text' | 'image'): string {
+  const message = kind === 'text'
+    ? 'Text is on your clipboard. Press Ctrl+V to paste it.'
+    : 'Image is on your clipboard. Press Ctrl+V to paste it.';
+  logPipeline({ level: 'warn', event: 'inject.clipboard_fallback', message, jobId: activeJobId, stage: 'inject', data: { reason: 'Wayland did not allow wtype injection' } });
+  if (Notification.isSupported()) new Notification({ title: 'Tawny copied the result', body: message }).show();
+  return message;
 }
 
 function createWindow(): void {
@@ -116,7 +248,9 @@ function showOverlay(): void {
   // Ensure window is always on top and in front of all open applications
   mainWindow.setAlwaysOnTop(true, 'screen-saver', 1);
   mainWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
-  mainWindow.showInactive();
+  // Show maps the window; showInactive is unsupported on Wayland. Keep it
+  // non-focusable so the previously focused editor remains the paste target.
+  mainWindow.show();
   mainWindow.moveTop();
   // Windows may restore the prior hidden-window position while showing it;
   // apply the fixed anchor once more after the native window is visible.
@@ -328,11 +462,50 @@ ipcMain.handle('auth:sign-out', async () => {
   mainWindow?.webContents.send('auth:profile', undefined);
 });
 ipcMain.handle('updates:open-release', async () => openLatestReleasePage());
-ipcMain.handle('updates:install', async () => {
-  if (process.platform === 'darwin' || (process.platform === 'linux' && !process.env.APPIMAGE)) return openLatestReleasePage();
-  const updater = await initializeUpdateService();
-  if (updater) updater.quitAndInstall();
-  else await openLatestReleasePage();
+ipcMain.handle('updates:install', () => installUpdateFromNotice());
+ipcMain.handle('hotkey:get', () => createHotkeyStatus());
+ipcMain.handle('hotkey:capture-mode', (_event, enabled: unknown) => {
+  if (typeof enabled !== 'boolean') throw new Error('Shortcut capture mode must be a boolean.');
+  globalShortcut.setSuspended(enabled);
+});
+ipcMain.handle('hotkey:save', async (_event, value: unknown) => {
+  if (pendingShortcutTest) {
+    const test = pendingShortcutTest;
+    pendingShortcutTest = undefined;
+    clearTimeout(test.timer);
+    test.resolve({ success: false, message: 'Test ended because the shortcut changed.' });
+  }
+  globalShortcut.setSuspended(false);
+  if (typeof value !== 'string') throw new Error('Shortcut must be a key combination.');
+  const accelerator = normalizeGlobalShortcut(value);
+  if (!accelerator) throw new Error('Use at least one modifier (Ctrl, Alt, Shift, or Super) and one key.');
+  await writeGlobalShortcut(accelerator);
+  return registerGlobalShortcut(accelerator);
+});
+ipcMain.handle('hotkey:test', (): Promise<HotkeyTestResult> => {
+  if (pendingShortcutTest) return Promise.resolve({ success: false, message: 'A shortcut test is already running.' });
+  const status = createHotkeyStatus();
+  if (!status.registered && !isWayland) {
+    return Promise.resolve({ success: false, message: 'Tawny has not registered this shortcut. Choose another combination or resolve the shortcut conflict first.' });
+  }
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      if (!pendingShortcutTest) return;
+      pendingShortcutTest = undefined;
+      const message = isWayland && !status.registered
+        ? `No trigger received. Bind the copied Wayland command to ${status.accelerator} in your compositor, then test again.`
+        : `No trigger received for ${status.accelerator}. Check for a system shortcut conflict and test again.`;
+      logPipeline({ level: 'warn', event: 'hotkey.test.failed', message, data: { accelerator: status.accelerator, wayland: String(isWayland) } });
+      resolve({ success: false, message });
+    }, 10_000);
+    pendingShortcutTest = { resolve, timer };
+    logPipeline({ event: 'hotkey.test.started', message: `Waiting up to 10 seconds for ${status.accelerator}.`, data: { accelerator: status.accelerator } });
+  });
+});
+ipcMain.handle('hotkey:copy-command', async () => {
+  const command = getCompositorCommand();
+  if (!command) throw new Error('Compositor command is available only in a Linux Wayland session.');
+  await clipboard.writeText(command);
 });
 ipcMain.handle('settings:get', () => {
   if (!authProfile) throw new Error('Sign in with Google before opening provider settings.');
@@ -491,11 +664,12 @@ ipcMain.handle('audio:transcribe', async (_event, audio: Uint8Array | Uint8Array
       await writeFile(outputPath, Buffer.from(image.base64, 'base64'));
       logPipeline({ event: 'image.saved', message: 'Cloudflare Flux image saved locally.', jobId: activeJobId, stage: 'handle', provider: 'cloudflare-flux', data: { path: outputPath } });
       actor.send({ type: 'STAGE', stage: 'injecting' });
-      await pasteImage(image.base64);
-      logPipeline({ event: 'image.inject.success', message: 'Generated image copied to the clipboard and pasted into the previously focused application.', jobId: activeJobId, stage: 'inject' });
-      snapshot = { ...snapshot, imageDataUrl: `data:${image.mimeType};base64,${image.base64.trim()}`, message: 'Image ready.' };
+      const pasteResult = await pasteImage(image.base64);
+      const completionMessage = pasteResult === 'clipboard' ? notifyClipboardOnly('image') : 'Image ready.';
+      logPipeline({ event: 'image.inject.success', message: pasteResult === 'clipboard' ? 'Generated image is on the clipboard; Wayland did not permit automatic paste.' : 'Generated image copied to the clipboard and pasted into the previously focused application.', jobId: activeJobId, stage: 'inject' });
+      snapshot = { ...snapshot, imageDataUrl: `data:${image.mimeType};base64,${image.base64.trim()}`, message: completionMessage };
       mainWindow?.webContents.send('overlay:update', snapshot);
-      actor.send({ type: 'SUCCESS', message: 'Image ready.' });
+      actor.send({ type: 'SUCCESS', message: completionMessage });
       return transcript;
     }
 
@@ -517,11 +691,12 @@ ipcMain.handle('audio:transcribe', async (_event, audio: Uint8Array | Uint8Array
         data: { model: rewrite.model, tier: rewrite.tier, mode: rewrite.mode }
       });
       actor.send({ type: 'STAGE', stage: 'injecting' });
-      await pasteText(rewrite.text);
-      logPipeline({ event: 'inject.success', message: 'Rewritten text pasted into the previously focused application.', jobId: activeJobId, stage: 'inject' });
-      snapshot = { ...snapshot, message: rewrite.text };
+      const pasteResult = await pasteText(rewrite.text);
+      const completionMessage = pasteResult === 'clipboard' ? notifyClipboardOnly('text') : 'Rewrite complete.';
+      logPipeline({ event: 'inject.success', message: pasteResult === 'clipboard' ? 'Rewritten text is on the clipboard; Wayland did not permit automatic paste.' : 'Rewritten text pasted into the previously focused application.', jobId: activeJobId, stage: 'inject' });
+      snapshot = { ...snapshot, message: completionMessage };
       mainWindow?.webContents.send('overlay:update', snapshot);
-      actor.send({ type: 'SUCCESS', message: 'Rewrite complete.' });
+      actor.send({ type: 'SUCCESS', message: completionMessage });
       return rewrite.text;
     }
 
@@ -543,22 +718,24 @@ ipcMain.handle('audio:transcribe', async (_event, audio: Uint8Array | Uint8Array
         data: { tier: clefDecision.tier }
       });
       actor.send({ type: 'STAGE', stage: 'injecting' });
-      await pasteText(responseText);
-      logPipeline({ event: 'inject.success', message: 'Assistant response pasted into the previously focused application.', jobId: activeJobId, stage: 'inject' });
-      snapshot = { ...snapshot, message: responseText };
+      const pasteResult = await pasteText(responseText);
+      const completionMessage = pasteResult === 'clipboard' ? notifyClipboardOnly('text') : 'Response ready.';
+      logPipeline({ event: 'inject.success', message: pasteResult === 'clipboard' ? 'Assistant response is on the clipboard; Wayland did not permit automatic paste.' : 'Assistant response pasted into the previously focused application.', jobId: activeJobId, stage: 'inject' });
+      snapshot = { ...snapshot, message: completionMessage };
       mainWindow?.webContents.send('overlay:update', snapshot);
-      actor.send({ type: 'SUCCESS', message: 'Response ready.' });
+      actor.send({ type: 'SUCCESS', message: completionMessage });
       return responseText;
     }
 
     // Path D: Normal sentence / dictation input: paste text directly at cursor pointer
     logPipeline({ event: 'decision.result', message: 'Dictation intent detected; pasting text at cursor.', jobId: activeJobId, stage: 'decide', data: { intent: 'plain_text' } });
     actor.send({ type: 'STAGE', stage: 'injecting' });
-    await pasteText(transcript);
-    logPipeline({ event: 'inject.success', message: 'Dictation pasted into the previously focused application.', jobId: activeJobId, stage: 'inject' });
-    snapshot = { ...snapshot, message: transcript };
+    const pasteResult = await pasteText(transcript);
+    const completionMessage = pasteResult === 'clipboard' ? notifyClipboardOnly('text') : 'Dictation complete.';
+    logPipeline({ event: 'inject.success', message: pasteResult === 'clipboard' ? 'Dictation is on the clipboard; Wayland did not permit automatic paste.' : 'Dictation pasted into the previously focused application.', jobId: activeJobId, stage: 'inject' });
+    snapshot = { ...snapshot, message: completionMessage };
     mainWindow?.webContents.send('overlay:update', snapshot);
-    actor.send({ type: 'SUCCESS', message: 'Dictation complete.' });
+    actor.send({ type: 'SUCCESS', message: completionMessage });
     return transcript;
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Groq transcription failed.';
@@ -581,14 +758,15 @@ ipcMain.on('pipeline:event', (_event, event: 'HOTKEY' | 'STOP' | 'CANCEL' | 'CON
 
 onUpdateAvailable((notice: UpdateNotice) => {
   mainWindow?.webContents.send('updates:state', notice);
+  if (notice.state === 'downloading' || notice.state === 'error') return;
+  const notificationKey = `${notice.state}:${notice.version ?? 'latest'}`;
+  if (updateNotificationsShown.has(notificationKey)) return;
+  updateNotificationsShown.add(notificationKey);
   if (!Notification.isSupported()) return;
   const notification = new Notification({ title: notice.state === 'ready' ? 'Tawny update ready' : 'Tawny early preview update', body: notice.message });
   notification.on('click', () => {
-    if (notice.state === 'ready' && process.platform !== 'darwin' && !(process.platform === 'linux' && !process.env.APPIMAGE)) {
-      void initializeUpdateService().then((updater) => updater?.quitAndInstall());
-    } else {
-      void openLatestReleasePage();
-    }
+    if (notice.state === 'ready') void installUpdateFromNotice().catch((error: unknown) => logPipeline({ level: 'warn', event: 'update.install.failure', message: error instanceof Error ? error.message : 'The update could not be installed.' }));
+    else void openLatestReleasePage();
   });
   notification.show();
 });
@@ -611,6 +789,9 @@ app.whenReady().then(async () => {
     message: `Tawny ${app.getVersion()} started on ${process.platform}.`,
     data: { version: app.getVersion(), platform: process.platform, authenticated: String(Boolean(authProfile)) }
   });
+  if (isWayland) {
+    logPipeline({ level: 'info', event: 'overlay.wayland.compositor-managed', message: 'Wayland controls window stacking and exact placement; use compositor window rules if Tawny does not appear above other windows.' });
+  }
   startKeyWatcher();
   session.defaultSession.setPermissionRequestHandler((webContents, permission, callback) => {
     const allowed = permission === 'media' && webContents.getType() === 'window';
@@ -620,69 +801,11 @@ app.whenReady().then(async () => {
   createWindow();
   mainWindow?.webContents.on('context-menu', () => showContextMenu());
   createTray();
-  const shortcut = 'Ctrl+Alt+Space';
-  let lastHotkeyTimestamp = 0;
-  const registered = globalShortcut.register(shortcut, () => {
-    if (!mainWindow) return;
-    const now = Date.now();
-    // Ignore OS auto-repeat keystrokes that fire repeatedly while hotkey is held
-    if (now - lastHotkeyTimestamp < 400) {
-      return;
-    }
-    lastHotkeyTimestamp = now;
-
-    if (!authProfile) {
-      mainWindow.show();
-      mainWindow.focus();
-      mainWindow.webContents.send('auth:required');
-      return;
-    }
-
-    if (snapshot.state === 'idle' || snapshot.state === 'done' || snapshot.state === 'failed' || snapshot.state === 'cancelled') {
-      stopPending = false;
-      activeJobId = `job-${Date.now().toString(36)}`;
-      snapshot = { ...snapshot, imageDataUrl: undefined, message: undefined, intent: undefined };
-      // Probe active selected text immediately while focused window is active:
-      pendingSelectedTextPromise = captureSelectedText().catch(() => '');
-      logPipeline({ event: 'hotkey.start', message: 'Global shortcut received; starting audio capture.', jobId: activeJobId, stage: 'capture' });
-      showOverlay();
-      actor.send({ type: 'HOTKEY' });
-
-      // Hold-to-talk release detection: only triggers if held for > 600ms and then released
-      const captureStartTime = Date.now();
-      if (process.platform === 'win32') watchKeyRelease(() => {
-        // Enforce that release only finalizes if user actually held for at least 600ms
-        if (Date.now() - captureStartTime >= 600) {
-          logPipeline({ event: 'hotkey.release', message: 'Shortcut released; finalizing capture.', jobId: activeJobId, stage: 'capture' });
-          stopRecording();
-        }
-      });
-
-      readyTimer = setTimeout(() => {
-        logPipeline({ event: 'capture.ready', message: 'Capture window is ready for audio.', jobId: activeJobId, stage: 'capture' });
-        actor.send({ type: 'AUDIO_READY' });
-        if (stopPending) {
-          stopRecording();
-        }
-      }, 160);
-    } else if (snapshot.state === 'recording') {
-      logPipeline({ event: 'hotkey.stop', message: 'Global shortcut toggle received; stopping capture.', jobId: activeJobId, stage: 'capture' });
-      stopRecording();
-    } else if (snapshot.state === 'confirming') {
-      logPipeline({ event: 'hotkey.confirm', message: 'Global shortcut received; confirming action.', jobId: activeJobId, stage: 'decide' });
-      actor.send({ type: 'CONFIRM' });
-    } else {
-      logPipeline({ event: 'hotkey.cancel', message: 'Global shortcut received; cancelling active job.', jobId: activeJobId, errorClass: 'cancelled' });
-      actor.send({ type: 'CANCEL' });
-    }
-  });
-  if (registered) {
-    console.log(`Global shortcut registered: ${shortcut}`);
-    logPipeline({ event: 'hotkey.registered', message: `Global shortcut ${shortcut} is ready.`, data: { accelerator: shortcut, platform: process.platform } });
-  } else {
-    const message = `Could not register ${shortcut}. Another app or the desktop environment may own or block this shortcut.`;
-    console.error(message);
-    logPipeline({ level: 'error', event: 'hotkey.register.failure', message, errorClass: 'environment', data: { accelerator: shortcut, platform: process.platform } });
+  activeShortcut = await readGlobalShortcut();
+  registerGlobalShortcut(activeShortcut);
+  if (pendingCliTrigger) {
+    pendingCliTrigger = false;
+    setTimeout(handleShortcutTrigger, 350);
   }
   void initializeUpdateService();
 }).catch((error: unknown) => {
@@ -691,6 +814,11 @@ app.whenReady().then(async () => {
 });
 app.on('will-quit', () => {
   if (readyTimer) clearTimeout(readyTimer);
+  if (pendingShortcutTest) {
+    clearTimeout(pendingShortcutTest.timer);
+    pendingShortcutTest.resolve({ success: false, message: 'Tawny closed before the shortcut test completed.' });
+    pendingShortcutTest = undefined;
+  }
   globalShortcut.unregisterAll();
   stopKeyWatcher();
   escapeRegistered = false;

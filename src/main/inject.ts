@@ -14,6 +14,14 @@ function runCommand(command: string, args: string[]): Promise<void> {
   });
 }
 
+function isWayland(): boolean {
+  return process.platform === 'linux' && Boolean(process.env.WAYLAND_DISPLAY || process.env.XDG_SESSION_TYPE?.toLowerCase() === 'wayland');
+}
+
+function delay(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
 function pasteShortcut(): Promise<void> {
   if (process.platform === 'win32') {
     return runCommand('powershell.exe', ['-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden', '-Command', '$wshell = New-Object -ComObject WScript.Shell; Start-Sleep -Milliseconds 80; $wshell.SendKeys("^v")']);
@@ -21,6 +29,7 @@ function pasteShortcut(): Promise<void> {
   if (process.platform === 'darwin') {
     return runCommand('/usr/bin/osascript', ['-e', 'delay 0.08', '-e', 'tell application "System Events" to keystroke "v" using {command down}']);
   }
+  if (isWayland()) return runCommand('wtype', ['-M', 'ctrl', 'v', '-m', 'ctrl']);
   return runCommand('xdotool', ['key', '--clearmodifiers', 'ctrl+v']).catch((error: unknown) => {
     const reason = error instanceof Error && 'code' in error && error.code === 'ENOENT'
       ? 'Install xdotool and use an X11 session to enable keyboard paste.'
@@ -36,16 +45,25 @@ function copyShortcut(): Promise<void> {
   if (process.platform === 'darwin') {
     return runCommand('/usr/bin/osascript', ['-e', 'delay 0.11', '-e', 'tell application "System Events" to keystroke "c" using {command down}', '-e', 'delay 0.18']);
   }
+  if (isWayland()) return runCommand('wtype', ['-M', 'ctrl', 'c', '-m', 'ctrl']).then(() => delay(180));
   return runCommand('xdotool', ['key', '--clearmodifiers', 'ctrl+c']).catch(() => {
     throw new Error('Selected-text capture needs xdotool in an X11 session. Dictation can still be used normally.');
   });
 }
 
-export async function pasteText(text: string): Promise<void> {
+export type PasteResult = 'pasted' | 'clipboard';
+
+export async function pasteText(text: string): Promise<PasteResult> {
   const value = text.trim();
   if (!value) throw new Error('There is no text to paste.');
   await clipboard.writeText(value);
-  await pasteShortcut();
+  try {
+    await pasteShortcut();
+    return 'pasted';
+  } catch (error) {
+    if (isWayland()) return 'clipboard';
+    throw error;
+  }
 }
 
 async function snapshotClipboard(): Promise<ClipboardSnapshot> {
@@ -88,7 +106,7 @@ export async function captureSelectedText(maxLength = 8_000): Promise<string> {
   }
 }
 
-export async function pasteImage(base64: string): Promise<void> {
+export async function pasteImage(base64: string): Promise<PasteResult> {
   const image = nativeImage.createFromBuffer(Buffer.from(base64, 'base64'));
   if (image.isEmpty()) throw new Error('Generated image data could not be placed on the clipboard.');
   await clipboard.write([
@@ -96,5 +114,11 @@ export async function pasteImage(base64: string): Promise<void> {
       'image/png': new Blob([new Uint8Array(image.toPNG())], { type: 'image/png' })
     })
   ]);
-  await pasteShortcut();
+  try {
+    await pasteShortcut();
+    return 'pasted';
+  } catch (error) {
+    if (isWayland()) return 'clipboard';
+    throw error;
+  }
 }

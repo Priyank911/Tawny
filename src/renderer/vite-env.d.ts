@@ -1,4 +1,4 @@
-import type { AuthProfile, OverlaySnapshot, PipelineLog, ProviderSettings, UpdateNotice } from '../shared/contracts';
+import type { AuthProfile, HotkeyStatus, HotkeyTestResult, OverlaySnapshot, PipelineLog, ProviderSettings, UpdateNotice } from '../shared/contracts';
 
 declare module '*.css';
 
@@ -10,6 +10,11 @@ declare global {
       onLog: (listener: (entry: PipelineLog) => void) => () => void;
       getSettings: () => Promise<ProviderSettings>;
       saveSettings: (settings: ProviderSettings) => Promise<void>;
+      getHotkey: () => Promise<HotkeyStatus>;
+      setHotkeyCaptureMode: (enabled: boolean) => Promise<void>;
+      saveHotkey: (accelerator: string) => Promise<HotkeyStatus>;
+      testHotkey: () => Promise<HotkeyTestResult>;
+      copyCompositorCommand: () => Promise<void>;
       generateImage: (prompt: string) => Promise<{ base64: string; mimeType: 'image/jpeg' }>;
       transcribeAudio: (audio: Uint8Array | Uint8Array[]) => Promise<string>;
       logCapture: (input: { event: string; message: string; level?: 'debug' | 'info' | 'warn' | 'error'; data?: Record<string, string> }) => void;

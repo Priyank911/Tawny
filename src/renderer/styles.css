@@ -582,6 +582,77 @@ button {
   margin-top: 23px;
 }
 
+.hotkey-settings {
+  display: grid;
+  gap: 10px;
+  margin-top: 18px;
+  padding: 13px;
+  border: 1px solid #e2e8f0;
+  border-radius: 14px;
+  background: #f8fafc;
+}
+
+.hotkey-settings-heading, .hotkey-controls, .compositor-command {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.hotkey-settings-heading > div, .compositor-command > div {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.hotkey-settings-heading span:first-child, .compositor-command span {
+  color: #1e293b;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.hotkey-settings-heading small, .compositor-command small {
+  color: #64748b;
+  font-size: 9px;
+  line-height: 1.4;
+}
+
+.hotkey-state {
+  flex: none;
+  padding: 5px 8px;
+  border-radius: 99px;
+  color: #9a6700;
+  background: #fff7e6;
+  font: 700 8px "DM Mono", monospace;
+  text-transform: uppercase;
+}
+
+.hotkey-state.is-registered {
+  color: #15803d;
+  background: #dcfce7;
+}
+
+.hotkey-controls { justify-content: flex-start; flex-wrap: wrap; }
+.hotkey-preview { min-width: 140px; padding: 8px 10px; border: 1px solid #dbe2ea; border-radius: 9px; color: #1e293b; background: #fff; font: 11px "DM Mono", monospace; text-align: center; }
+.hotkey-secondary, .hotkey-save { border: 0; border-radius: 9px; padding: 8px 10px; cursor: pointer; font: 700 9px sans-serif; }
+.hotkey-secondary { color: #475569; background: #e8edf3; }
+.hotkey-secondary:hover { background: #dde5ed; }
+.hotkey-save { margin-left: auto; color: #fff; background: #1e293b; }
+.hotkey-save:hover { background: #334155; }
+.hotkey-test { margin-left: 0; }
+.hotkey-test:disabled { cursor: wait; opacity: .7; }
+.hotkey-capture { width: 100%; border: 1px solid #16a34a; border-radius: 9px; padding: 10px; color: #166534; background: #f0fdf4; cursor: text; font-size: 10px; outline: none; }
+.hotkey-status-copy, .hotkey-error, .hotkey-saved { margin: 0; color: #64748b; font-size: 9px; line-height: 1.4; }
+.hotkey-error { color: #b42318; }
+.hotkey-saved { color: #15803d; }
+.hotkey-test-result { margin: 0; padding: 7px 9px; border-radius: 8px; color: #475569; background: #eef2f6; font-size: 9px; line-height: 1.4; }
+.hotkey-test-result.is-waiting { color: #475569; background: #eef2f6; }
+.hotkey-test-result.is-passed { color: #166534; background: #dcfce7; }
+.hotkey-test-result.is-failed { color: #9f2d24; background: #fff1ef; }
+.compositor-command { align-items: flex-end; padding-top: 9px; border-top: 1px solid #e2e8f0; }
+.compositor-command code { display: block; max-width: 360px; overflow: hidden; margin-top: 4px; color: #475569; font: 9px "DM Mono", monospace; text-overflow: ellipsis; white-space: nowrap; }
+.status-dot-warning { background: #d97706 !important; box-shadow: 0 0 0 4px rgba(217, 119, 6, .12) !important; }
+
 .field {
   display: grid;
   gap: 5px;
@@ -962,6 +1033,7 @@ button {
 .update-notice-copy span { color: #64716a; font-size: 9px; line-height: 1.35; }
 .update-action { flex: none; padding: 7px 9px; border: 0; border-radius: 8px; color: #fff; background: #26302b; cursor: pointer; font-size: 9px; font-weight: 700; }
 .update-action:hover { background: #48594a; }
+.update-action:disabled { opacity: .65; cursor: wait; }
 .update-dismiss { display: grid; place-items: center; width: 22px; height: 22px; flex: none; border: 0; border-radius: 50%; color: #879188; background: transparent; cursor: pointer; }
 .update-dismiss:hover { color: #26302b; background: #f1f3ee; }
 

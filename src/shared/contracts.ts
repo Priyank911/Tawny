@@ -91,6 +91,19 @@ export interface UpdateNotice {
   message: string;
 }
 
+export interface HotkeyStatus {
+  accelerator: string;
+  registered: boolean;
+  wayland: boolean;
+  compositorCommand?: string;
+  message: string;
+}
+
+export interface HotkeyTestResult {
+  success: boolean;
+  message: string;
+}
+
 export const logLevelSchema = z.enum(['debug', 'info', 'warn', 'error']);
 export type LogLevel = z.infer<typeof logLevelSchema>;
 

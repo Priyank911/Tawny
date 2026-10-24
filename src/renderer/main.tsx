@@ -1,10 +1,31 @@
-import { StrictMode, useEffect, useMemo, useRef, useState, type ReactElement } from 'react';
+import { StrictMode, useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactElement } from 'react';
 import { createRoot } from 'react-dom/client';
 import { ChevronRight, Image as ImageIcon, LoaderCircle, Sparkles, ScrollText, Settings2, X, Keyboard, ShieldCheck, Code as CodeIcon, FileText as FileTextIcon, LogOut, UserRound, ExternalLink, Download } from 'lucide-react';
-import type { AuthProfile, OverlaySnapshot, PipelineLog, ProviderSettings, UpdateNotice } from '../shared/contracts';
+import type { AuthProfile, HotkeyStatus, OverlaySnapshot, PipelineLog, ProviderSettings, UpdateNotice } from '../shared/contracts';
 import './styles.css';
 
 const RECORDING_SEGMENT_MS = 60_000;
+const DEFAULT_SHORTCUT = 'Ctrl+Alt+Space';
+
+function displayShortcut(accelerator: string): string {
+  return accelerator.split('+').join(' + ');
+}
+
+function acceleratorFromKeyEvent(event: ReactKeyboardEvent<HTMLButtonElement>): string | undefined {
+  const key = event.key;
+  if (['Control', 'Alt', 'Shift', 'Meta'].includes(key)) return undefined;
+  const modifiers: string[] = [];
+  if (event.ctrlKey) modifiers.push('Ctrl');
+  if (event.altKey) modifiers.push('Alt');
+  if (event.shiftKey) modifiers.push('Shift');
+  if (event.metaKey) modifiers.push(navigator.platform.toLowerCase().includes('mac') ? 'Command' : 'Super');
+  const keyAliases: Record<string, string> = {
+    ' ': 'Space', Escape: 'Escape', Enter: 'Return', Backspace: 'Backspace', Delete: 'Delete', Tab: 'Tab',
+    ArrowUp: 'Up', ArrowDown: 'Down', ArrowLeft: 'Left', ArrowRight: 'Right'
+  };
+  const normalizedKey = keyAliases[key] ?? (/^[a-z0-9]$/i.test(key) ? key.toUpperCase() : /^F([1-9]|1[0-9]|2[0-4])$/i.test(key) ? key.toUpperCase() : undefined);
+  return normalizedKey && modifiers.length ? [...modifiers, normalizedKey].join('+') : undefined;
+}
 
 function App(): ReactElement {
   const [snapshot, setSnapshot] = useState<OverlaySnapshot>({ state: 'idle', elapsedMs: 0, rms: 0 });
@@ -21,6 +42,15 @@ function App(): ReactElement {
   const [authError, setAuthError] = useState('');
   const [accountMenuOpen, setAccountMenuOpen] = useState(false);
   const [updateNotice, setUpdateNotice] = useState<UpdateNotice | undefined>(undefined);
+  const [hotkeyStatus, setHotkeyStatus] = useState<HotkeyStatus>({ accelerator: DEFAULT_SHORTCUT, registered: false, wayland: false, message: 'Checking shortcut registration…' });
+  const [hotkeyDraft, setHotkeyDraft] = useState(DEFAULT_SHORTCUT);
+  const [recordingHotkey, setRecordingHotkey] = useState(false);
+  const [hotkeySaved, setHotkeySaved] = useState(false);
+  const [hotkeyTestState, setHotkeyTestState] = useState<'idle' | 'waiting' | 'passed' | 'failed'>('idle');
+  const [hotkeyTestMessage, setHotkeyTestMessage] = useState('');
+  const [commandCopied, setCommandCopied] = useState(false);
+  const [hotkeyError, setHotkeyError] = useState('');
+  const [installingUpdate, setInstallingUpdate] = useState(false);
   const recorderRef = useRef<MediaRecorder | undefined>(undefined);
   const streamRef = useRef<MediaStream | undefined>(undefined);
   const chunksRef = useRef<Blob[]>([]);
@@ -70,6 +100,10 @@ function App(): ReactElement {
     void window.voiceRouter.getSnapshot().then(setSnapshot);
     void window.voiceRouter.getAuthProfile().then(setAuthProfile).catch(() => setAuthProfile(undefined));
     void window.voiceRouter.getLogs().then(setLogs);
+    void window.voiceRouter.getHotkey().then((status) => {
+      setHotkeyStatus(status);
+      setHotkeyDraft(status.accelerator);
+    }).catch(() => undefined);
     const unsubscribeSnapshot = window.voiceRouter.subscribe(setSnapshot);
     const unsubscribeSettings = window.voiceRouter.onOpenSettings(() => setSettingsOpen(true));
     const unsubscribeOpenLogs = window.voiceRouter.onOpenLogs(() => setLogsOpen(true));
@@ -102,6 +136,13 @@ function App(): ReactElement {
       setAuthError(error instanceof Error ? error.message : 'Provider settings could not be loaded.');
     });
   }, [authProfile]);
+  useEffect(() => {
+    if (!settingsOpen) return;
+    void window.voiceRouter?.getHotkey().then((status) => {
+      setHotkeyStatus(status);
+      setHotkeyDraft(status.accelerator);
+    }).catch(() => undefined);
+  }, [settingsOpen]);
   useEffect(() => {
     if (state !== 'arming' || recorderRef.current || capturePendingRef.current) return undefined;
     const capture = async (): Promise<void> => {
@@ -227,7 +268,7 @@ function App(): ReactElement {
       : 'Dictation ready';
 
     const map: Record<string, [string, string]> = {
-      idle: ['Ready', 'Ctrl + Alt + Space'],
+      idle: ['Ready', displayShortcut(hotkeyStatus.accelerator)],
       arming: ['Listening', 'Speak now'],
       recording: ['Listening', 'Release to send'],
       finalizing: ['Finishing', 'Saving audio'],
@@ -237,12 +278,12 @@ function App(): ReactElement {
       confirming: ['Generate image?', 'Press Enter to confirm'],
       handling: [handlingTitle, handlingSubtitle],
       injecting: ['Pasting', 'Returning to your app'],
-      done: [doneTitle, isImage ? 'Preview generated locally' : 'Pasted at cursor'],
+      done: [doneTitle, snapshot.message?.includes('clipboard') ? snapshot.message : isImage ? 'Preview generated locally' : 'Pasted at cursor'],
       failed: ['Something went wrong', snapshot.message ?? 'Retry with hotkey'],
       cancelled: ['Cancelled', 'Nothing was sent']
     };
     return map[state] ?? ['Tawny', ''];
-  }, [state, snapshot.intent, snapshot.message, snapshot.imageDataUrl]);
+  }, [state, snapshot.intent, snapshot.message, snapshot.imageDataUrl, hotkeyStatus.accelerator]);
 
   const isListening = state === 'recording' || state === 'arming';
   const isBusy = ['transcribing', 'gating', 'deciding', 'handling', 'injecting', 'finalizing'].includes(state);
@@ -251,6 +292,103 @@ function App(): ReactElement {
     await window.voiceRouter.saveSettings(settings);
     setSaved(true);
     window.setTimeout(() => setSaved(false), 2200);
+  }
+
+  function captureShortcut(event: ReactKeyboardEvent<HTMLButtonElement>): void {
+    event.preventDefault();
+    if (event.key === 'Escape') {
+      void window.voiceRouter?.setHotkeyCaptureMode(false);
+      setRecordingHotkey(false);
+      setHotkeyError('Shortcut change cancelled.');
+      return;
+    }
+    const accelerator = acceleratorFromKeyEvent(event);
+    if (!accelerator) {
+      if (!['Control', 'Alt', 'Shift', 'Meta'].includes(event.key)) {
+        void window.voiceRouter?.setHotkeyCaptureMode(false);
+        setRecordingHotkey(false);
+        setHotkeyError('Use at least one modifier and one non-modifier key.');
+      }
+      return;
+    }
+    void window.voiceRouter?.setHotkeyCaptureMode(false);
+    setHotkeyDraft(accelerator);
+    setRecordingHotkey(false);
+    setHotkeyError('');
+    setHotkeySaved(false);
+    setHotkeyTestState('idle');
+    setHotkeyTestMessage('');
+    setCommandCopied(false);
+  }
+
+  async function saveShortcut(): Promise<void> {
+    setHotkeyError('');
+    setHotkeySaved(false);
+    setHotkeyTestState('idle');
+    setHotkeyTestMessage('');
+    setCommandCopied(false);
+    try {
+      await window.voiceRouter?.setHotkeyCaptureMode(false);
+      const status = await window.voiceRouter?.saveHotkey(hotkeyDraft);
+      if (!status) return;
+      setHotkeyStatus(status);
+      setHotkeyDraft(status.accelerator);
+      setHotkeySaved(true);
+      setHotkeyTestState('idle');
+      setHotkeyTestMessage('');
+    } catch (error) {
+      setHotkeyError(error instanceof Error ? error.message : 'Shortcut could not be saved.');
+    }
+  }
+
+  async function testShortcut(): Promise<void> {
+    setHotkeyError('');
+    setHotkeyTestState('waiting');
+    setHotkeyTestMessage(`Press ${displayShortcut(hotkeyStatus.accelerator)} now. Waiting up to 10 seconds…`);
+    try {
+      const result = await window.voiceRouter?.testHotkey();
+      if (!result) {
+        setHotkeyTestState('failed');
+        setHotkeyTestMessage('The shortcut test could not start.');
+        return;
+      }
+      setHotkeyTestState(result.success ? 'passed' : 'failed');
+      setHotkeyTestMessage(result.message);
+    } catch (error) {
+      setHotkeyTestState('failed');
+      setHotkeyTestMessage(error instanceof Error ? error.message : 'The shortcut test failed.');
+    }
+  }
+
+  async function beginShortcutCapture(): Promise<void> {
+    setHotkeyError('');
+    try {
+      await window.voiceRouter?.setHotkeyCaptureMode(true);
+      setRecordingHotkey(true);
+    } catch (error) {
+      setHotkeyError(error instanceof Error ? error.message : 'Shortcut capture could not start.');
+    }
+  }
+
+  async function copyCompositorCommand(): Promise<void> {
+    setHotkeyError('');
+    try {
+      await window.voiceRouter?.copyCompositorCommand();
+      setCommandCopied(true);
+      window.setTimeout(() => setCommandCopied(false), 2200);
+    } catch (error) {
+      setHotkeyError(error instanceof Error ? error.message : 'The compositor command could not be copied.');
+    }
+  }
+
+  async function installUpdate(): Promise<void> {
+    setInstallingUpdate(true);
+    try {
+      await window.voiceRouter?.installUpdate();
+    } catch (error) {
+      setInstallingUpdate(false);
+      setUpdateNotice({ state: 'error', message: error instanceof Error ? error.message : 'The update could not be installed.' });
+    }
   }
 
   async function handleGoogleSignIn(): Promise<void> {
@@ -284,8 +422,8 @@ function App(): ReactElement {
               <span>Tawny</span>
             </div>
             <div className="top-actions">
-              <span className="status-dot" />
-              <span className="status-label">READY</span>
+              <span className={`status-dot ${hotkeyStatus.registered ? '' : 'status-dot-warning'}`} />
+              <span className="status-label">{hotkeyStatus.registered ? 'READY' : hotkeyStatus.wayland ? 'SET KEY' : 'CHECK KEY'}</span>
               <button className="main-settings-button" onClick={() => setLogsOpen(true)}><ScrollText size={13} /> Live log</button>
               <button className="main-settings-button" onClick={() => setSettingsOpen(true)}><SettingsIcon /> Settings</button>
             </div>
@@ -310,7 +448,7 @@ function App(): ReactElement {
               <div className="preview-card">
                 <img src="./tawny-mark.svg" alt="" />
                 <strong>Ready when you are</strong>
-                <span>Ctrl + Alt + Space</span>
+                <span>{displayShortcut(hotkeyStatus.accelerator)}</span>
               </div>
             </div> : <div className="signin-column">
               <div className="signin-card">
@@ -343,7 +481,7 @@ function App(): ReactElement {
           {updateNotice && <aside className={`update-notice update-${updateNotice.state}`} role="status">
             <div className="update-notice-icon"><Download size={15} /></div>
             <div className="update-notice-copy"><strong>{updateNotice.state === 'ready' ? 'Update ready' : updateNotice.state === 'error' ? 'Update check' : 'Early preview update'}</strong><span>{updateNotice.message}</span></div>
-            {(updateNotice.state === 'manual' || updateNotice.state === 'ready') && <button className="update-action" onClick={() => void (updateNotice.state === 'ready' ? window.voiceRouter?.installUpdate() : window.voiceRouter?.openReleasePage())}>{updateNotice.state === 'ready' ? 'Restart' : 'View release'}</button>}
+            {(updateNotice.state === 'manual' || updateNotice.state === 'ready') && <button className="update-action" disabled={installingUpdate} onClick={() => void (updateNotice.state === 'ready' ? installUpdate() : window.voiceRouter?.openReleasePage())}>{updateNotice.state === 'ready' ? installingUpdate ? 'Restarting…' : 'Restart to update' : 'View release'}</button>}
             <button className="update-dismiss" aria-label="Dismiss update notice" onClick={() => setUpdateNotice(undefined)}><X size={14} /></button>
           </aside>}
         </>
@@ -426,6 +564,22 @@ function App(): ReactElement {
       {settingsOpen && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.currentTarget === event.target) setSettingsOpen(false); }}>
         <section className="settings-panel" role="dialog" aria-modal="true" aria-labelledby="settings-title">
           <div className="settings-heading"><div><p className="eyebrow">TAWNY / SETTINGS</p><h2 id="settings-title">Connect your providers</h2><p>Keys are encrypted with Windows secure storage and never written to logs.</p></div><button className="close-button" onClick={() => setSettingsOpen(false)} aria-label="Close settings"><X size={17} /></button></div>
+          <section className="hotkey-settings" aria-labelledby="hotkey-title">
+            <div className="hotkey-settings-heading"><div><span id="hotkey-title">Recording shortcut</span><small>Choose the key combination Tawny listens for.</small></div><span className={`hotkey-state ${hotkeyStatus.registered ? 'is-registered' : 'needs-compositor'}`}>{hotkeyStatus.registered ? 'Registered' : hotkeyStatus.wayland ? 'Compositor setup' : 'Not registered'}</span></div>
+            <div className="hotkey-controls">
+              <kbd className="hotkey-preview">{displayShortcut(hotkeyDraft)}</kbd>
+              <button className="hotkey-secondary" onClick={() => void beginShortcutCapture()}>Record keys</button>
+              <button className="hotkey-secondary hotkey-test" onClick={() => void testShortcut()} disabled={hotkeyTestState === 'waiting'}>{hotkeyTestState === 'waiting' ? 'Listening…' : 'Test key'}</button>
+              <button className="hotkey-save" onClick={() => void saveShortcut()}>Save shortcut</button>
+            </div>
+            {recordingHotkey && <button className="hotkey-capture" onKeyDown={captureShortcut} onBlur={() => { setRecordingHotkey(false); void window.voiceRouter?.setHotkeyCaptureMode(false); }} autoFocus>Press your shortcut now · Esc cancels</button>}
+            <p className="hotkey-status-copy" role="status">{hotkeyStatus.message}</p>
+            {hotkeyStatus.wayland && hotkeyStatus.compositorCommand && <div className="compositor-command"><div><span>Wayland fallback command</span><small>Bind this in your compositor’s keyboard-shortcut settings if the portal shortcut doesn’t trigger.</small><code title={hotkeyStatus.compositorCommand}>{hotkeyStatus.compositorCommand}</code></div><button className="hotkey-secondary" onClick={() => void copyCompositorCommand()}>Copy</button></div>}
+            {hotkeyTestMessage && <p className={`hotkey-test-result is-${hotkeyTestState}`} role="status">{hotkeyTestMessage}</p>}
+            {hotkeyError && <p className="hotkey-error" role="alert">{hotkeyError}</p>}
+            {hotkeySaved && !hotkeyError && <p className="hotkey-saved" role="status">Shortcut saved on this device.</p>}
+            {commandCopied && !hotkeyError && <p className="hotkey-saved" role="status">Compositor command copied.</p>}
+          </section>
           <div className="settings-grid">
             {([
               ['groqApiKey', 'Groq API key', 'Used for Whisper transcription'],
@@ -439,7 +593,7 @@ function App(): ReactElement {
       {logsOpen && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.currentTarget === event.target) setLogsOpen(false); }}>
         <section className="logs-panel" role="dialog" aria-modal="true" aria-labelledby="logs-title">
           <div className="settings-heading"><div><p className="eyebrow">TAWNY / DIAGNOSTICS</p><h2 id="logs-title">Live pipeline log</h2><p>Every stage transition is recorded locally. Secrets and transcript contents are redacted.</p></div><button className="close-button" onClick={() => setLogsOpen(false)} aria-label="Close live log"><X size={17} /></button></div>
-          <div className="log-list">{logs.length === 0 ? <p className="empty-log">No pipeline activity yet. Press Ctrl + Alt + Space to start a job.</p> : logs.map((entry, index) => <div className={`log-entry log-${entry.level}`} key={`${entry.timestamp}-${index}`}><time>{new Date(entry.timestamp).toLocaleTimeString()}</time><span className="log-event">{entry.event}</span><span className="log-message">{entry.message}</span>{entry.durationMs !== undefined && <span className="log-duration">{entry.durationMs}ms</span>}</div>)}</div>
+          <div className="log-list">{logs.length === 0 ? <p className="empty-log">No pipeline activity yet. Press {displayShortcut(hotkeyStatus.accelerator)} to start a job.</p> : logs.map((entry, index) => <div className={`log-entry log-${entry.level}`} key={`${entry.timestamp}-${index}`}><time>{new Date(entry.timestamp).toLocaleTimeString()}</time><span className="log-event">{entry.event}</span><span className="log-message">{entry.message}</span>{entry.durationMs !== undefined && <span className="log-duration">{entry.durationMs}ms</span>}</div>)}</div>
           <div className="settings-footer"><span>{logs.length} recent events · JSONL file is stored in the Tawny app data logs folder.</span><button className="save-button" onClick={() => setLogsOpen(false)}>Close log</button></div>
         </section>
       </div>}

@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer } from 'electron';
-import type { AuthProfile, OverlaySnapshot, PipelineLog, ProviderSettings, UpdateNotice } from '../shared/contracts';
+import type { AuthProfile, HotkeyStatus, HotkeyTestResult, OverlaySnapshot, PipelineLog, ProviderSettings, UpdateNotice } from '../shared/contracts';
 
 contextBridge.exposeInMainWorld('voiceRouter', {
   getSnapshot: (): Promise<OverlaySnapshot> => ipcRenderer.invoke('overlay:get-snapshot'),
@@ -11,6 +11,11 @@ contextBridge.exposeInMainWorld('voiceRouter', {
   },
   getSettings: (): Promise<ProviderSettings> => ipcRenderer.invoke('settings:get'),
   saveSettings: (settings: ProviderSettings): Promise<void> => ipcRenderer.invoke('settings:save', settings),
+  getHotkey: (): Promise<HotkeyStatus> => ipcRenderer.invoke('hotkey:get'),
+  setHotkeyCaptureMode: (enabled: boolean): Promise<void> => ipcRenderer.invoke('hotkey:capture-mode', enabled),
+  saveHotkey: (accelerator: string): Promise<HotkeyStatus> => ipcRenderer.invoke('hotkey:save', accelerator),
+  testHotkey: (): Promise<HotkeyTestResult> => ipcRenderer.invoke('hotkey:test'),
+  copyCompositorCommand: (): Promise<void> => ipcRenderer.invoke('hotkey:copy-command'),
   generateImage: (prompt: string) => ipcRenderer.invoke('image:generate', prompt),
   transcribeAudio: (audio: Uint8Array | Uint8Array[]): Promise<string> => ipcRenderer.invoke('audio:transcribe', audio),
   logCapture: (input: { event: string; message: string; level?: 'debug' | 'info' | 'warn' | 'error'; data?: Record<string, string> }): void => ipcRenderer.send('capture:log', input),

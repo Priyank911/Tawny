@@ -245,7 +245,7 @@ Electron `safeStorage` encrypts provider credentials and the Firebase refresh se
 - A Groq API key
 - A Cloudflare account ID and API token with Workers AI access
 - A Firebase project with Google Authentication enabled and a Google OAuth Desktop client ID
-- Linux X11 plus `xdotool` for automatic copy/paste; Wayland clipboard writes work, but synthetic key injection may be blocked by the compositor
+- Linux X11 plus `xdotool` for automatic copy/paste; Wayland uses `wtype` when the compositor allows virtual-keyboard input and otherwise keeps results on the clipboard with a notification
 
 ### Install and develop
 
@@ -387,7 +387,7 @@ pnpm test
 
 ## Platform limitations
 
-- Simulated paste can fail for elevated applications, protected fields, or applications that block synthetic input. macOS requires microphone permission for recording and may require Accessibility/Automation approval for System Events paste. Linux global shortcuts use the desktop portal on Wayland (approve the first-run prompt); automatic selection/paste uses `xdotool` on X11, while Wayland may deny synthetic keystrokes and require manual paste from the clipboard.
+- Simulated paste can fail for elevated applications, protected fields, or applications that block synthetic input. macOS requires microphone permission for recording and may require Accessibility/Automation approval for System Events paste. Tawny's shortcut is configurable in Settings. Linux global shortcuts use the desktop portal on Wayland; if Tawny cannot confirm a portal binding, Settings provides a `--trigger` command to bind in the compositor. X11 uses `xdotool`; Wayland uses `wtype` when allowed and otherwise keeps the result on the clipboard with a notification. Wayland compositors control overlay stacking and placement, so custom window rules may be needed for top-center placement.
 - Hold-to-talk release detection uses the Windows-native key watcher. On macOS and Linux the global shortcut toggles recording: press once to start and again to stop.
 - An unsigned macOS build cannot use the standard automatic updater. Tawny checks releases and opens the release page for a manual install. Debian package updates are package-manager driven; AppImage can use in-app updates.
 - Tawny currently does not capture and restore the user’s previous clipboard contents.
