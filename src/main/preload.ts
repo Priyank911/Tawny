@@ -11,6 +11,7 @@ contextBridge.exposeInMainWorld('voiceRouter', {
   },
   getSettings: (): Promise<ProviderSettings> => ipcRenderer.invoke('settings:get'),
   closeSettings: (): Promise<void> => ipcRenderer.invoke('settings:close'),
+  setSettingsOpen: (open: boolean): void => ipcRenderer.send('settings:state', open),
   saveSettings: (settings: ProviderSettings): Promise<void> => ipcRenderer.invoke('settings:save', settings),
   getHotkey: (): Promise<HotkeyStatus> => ipcRenderer.invoke('hotkey:get'),
   setHotkeyCaptureMode: (enabled: boolean): Promise<void> => ipcRenderer.invoke('hotkey:capture-mode', enabled),

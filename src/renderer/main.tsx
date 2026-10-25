@@ -102,7 +102,7 @@ function App(): ReactElement {
       setHotkeyDraft(status.accelerator);
     }).catch(() => undefined);
     const unsubscribeSnapshot = window.voiceRouter.subscribe(setSnapshot);
-    const unsubscribeSettings = window.voiceRouter.onOpenSettings(() => setSettingsOpen(true));
+    const unsubscribeSettings = window.voiceRouter.onOpenSettings(openSettingsPanel);
     const unsubscribeOpenLogs = window.voiceRouter.onOpenLogs(() => setLogsOpen(true));
     const unsubscribeBackground = window.voiceRouter.onBackgroundMode(() => setMainPage(false));
     const unsubscribeAuth = window.voiceRouter.onAuthProfile(setAuthProfile);
@@ -284,6 +284,11 @@ function App(): ReactElement {
 
   const isListening = state === 'recording' || state === 'arming';
   const isBusy = ['transcribing', 'gating', 'deciding', 'handling', 'injecting', 'finalizing'].includes(state);
+  function openSettingsPanel(): void {
+    window.voiceRouter?.setSettingsOpen(true);
+    setSettingsOpen(true);
+  }
+
   function closeSettingsPanel(): void {
     setSettingsOpen(false);
     void window.voiceRouter?.closeSettings();
@@ -423,7 +428,7 @@ function App(): ReactElement {
               <span className={`status-dot ${hotkeyStatus.registered ? '' : 'status-dot-warning'}`} />
               <span className="status-label">{hotkeyStatus.registered ? 'READY' : hotkeyStatus.wayland ? 'SET KEY' : 'CHECK KEY'}</span>
               <button className="main-settings-button" onClick={() => setLogsOpen(true)}><ScrollText size={13} /> Live log</button>
-              <button className="main-settings-button" onClick={() => setSettingsOpen(true)}><SettingsIcon /> Settings</button>
+              <button className="main-settings-button" onClick={openSettingsPanel}><SettingsIcon /> Settings</button>
             </div>
           </header>
           <section className="welcome-page">
@@ -435,7 +440,7 @@ function App(): ReactElement {
                 <button className="launch-button" onClick={() => { setMainPage(false); void window.voiceRouter?.enterBackground(); }}>
                   Run in background <KeyboardIcon />
                 </button>
-                <button className="secondary-button" onClick={() => setSettingsOpen(true)}>
+                <button className="secondary-button" onClick={openSettingsPanel}>
                   <SettingsIcon /> Configure providers
                 </button>
               </div> : <p className="signin-trust-note"><ShieldCheck size={14} /> Sign in once on this device. Your Firebase session is kept in secure system storage.</p>}

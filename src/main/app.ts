@@ -23,6 +23,7 @@ import { initializeUpdateService, isDownloadedUpdateReady, onUpdateAvailable, op
 import { linuxPasswordStorePreference } from './linuxKeyring';
 import { DEFAULT_GLOBAL_SHORTCUT, buildCompositorTriggerCommand, isWaylandSession, normalizeGlobalShortcut } from './hotkeyConfig';
 import { readGlobalShortcut, writeGlobalShortcut } from './hotkeyPreferences';
+import { shouldDispatchShortcutTrigger } from './hotkeyDispatch';
 
 const linuxPasswordStore = linuxPasswordStorePreference(
   process.platform,
@@ -50,6 +51,8 @@ let lastHotkeyTimestamp = 0;
 let pendingShortcutTest: { resolve: (result: HotkeyTestResult) => void; timer: NodeJS.Timeout } | undefined;
 let settingsReturnState: { background: boolean; bounds: { x: number; y: number; width: number; height: number }; visible: boolean } | undefined;
 let rendererRecoveryUsed = false;
+let settingsPanelOpen = false;
+let shortcutCaptureMode = false;
 const isWayland = isWaylandSession(process.platform, process.env);
 const updateNotificationsShown = new Set<string>();
 let pendingCliTrigger = process.argv.includes('--trigger');
@@ -72,6 +75,14 @@ if (!hasSingleInstanceLock) {
 
 function handleShortcutTrigger(): void {
   if (!mainWindow) return;
+  if (!shouldDispatchShortcutTrigger({
+    settingsOpen: settingsPanelOpen,
+    captureMode: shortcutCaptureMode,
+    testPending: Boolean(pendingShortcutTest)
+  })) {
+    logPipeline({ event: 'hotkey.ignored.settings', message: 'Ignored a shortcut trigger while Settings or shortcut recording is active.' });
+    return;
+  }
   if (pendingShortcutTest) {
     const test = pendingShortcutTest;
     pendingShortcutTest = undefined;
@@ -232,6 +243,9 @@ function createWindow(): void {
       message: `The Tawny renderer exited (${details.reason}, code ${details.exitCode}).`,
       data: { reason: details.reason, exitCode: String(details.exitCode) }
     });
+    settingsPanelOpen = false;
+    shortcutCaptureMode = false;
+    globalShortcut.setSuspended(false);
     if (rendererRecoveryUsed || quitting) return;
     rendererRecoveryUsed = true;
     const windowRef = mainWindow;
@@ -302,6 +316,14 @@ function enterBackground(): void {
 
 function openSettings(): void {
   if (!mainWindow) return;
+  if (settingsPanelOpen) {
+    mainWindow.show();
+    mainWindow.focus();
+    return;
+  }
+  shortcutCaptureMode = false;
+  globalShortcut.setSuspended(false);
+  settingsPanelOpen = true;
   settingsReturnState = {
     background: backgroundMode,
     bounds: mainWindow.getBounds(),
@@ -324,6 +346,15 @@ function openSettings(): void {
 function closeSettingsWindow(): void {
   const previous = settingsReturnState;
   settingsReturnState = undefined;
+  settingsPanelOpen = false;
+  shortcutCaptureMode = false;
+  globalShortcut.setSuspended(false);
+  if (pendingShortcutTest) {
+    const test = pendingShortcutTest;
+    pendingShortcutTest = undefined;
+    clearTimeout(test.timer);
+    test.resolve({ success: false, message: 'Shortcut test ended because Settings was closed.' });
+  }
   if (!mainWindow || !previous) return;
   if (previous.background) {
     enterBackground();
@@ -518,6 +549,7 @@ ipcMain.handle('updates:install', () => installUpdateFromNotice());
 ipcMain.handle('hotkey:get', () => createHotkeyStatus());
 ipcMain.handle('hotkey:capture-mode', (_event, enabled: unknown) => {
   if (typeof enabled !== 'boolean') throw new Error('Shortcut capture mode must be a boolean.');
+  shortcutCaptureMode = enabled;
   globalShortcut.setSuspended(enabled);
 });
 ipcMain.handle('hotkey:save', async (_event, value: unknown) => {
@@ -564,6 +596,9 @@ ipcMain.handle('settings:get', () => {
   return readProviderSettings();
 });
 ipcMain.handle('settings:close', () => closeSettingsWindow());
+ipcMain.on('settings:state', (_event, open: unknown) => {
+  if (typeof open === 'boolean') settingsPanelOpen = open;
+});
 ipcMain.handle('settings:save', async (_event, settings) => {
   if (!authProfile) throw new Error('Sign in with Google before saving provider settings.');
   await saveProviderSettings(settings);

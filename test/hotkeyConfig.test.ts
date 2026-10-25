@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { buildCompositorTriggerCommand, isWaylandSession, normalizeGlobalShortcut } from '../src/main/hotkeyConfig';
+import { shouldDispatchShortcutTrigger } from '../src/main/hotkeyDispatch';
 
 describe('global shortcut preferences', () => {
   it('normalizes modifier aliases and key case', () => {
@@ -23,5 +24,15 @@ describe('global shortcut preferences', () => {
   it('quotes compositor command paths safely', () => {
     expect(buildCompositorTriggerCommand('/opt/Tawny App/tawny')).toBe("'/opt/Tawny App/tawny' --trigger");
     expect(buildCompositorTriggerCommand('/tmp/Tawny', '/opt/App Dir')).toBe("'/tmp/Tawny' '/opt/App Dir' --trigger");
+  });
+
+  it('does not dispatch voice triggers while editing settings or recording a shortcut', () => {
+    expect(shouldDispatchShortcutTrigger({ settingsOpen: true, captureMode: false, testPending: false })).toBe(false);
+    expect(shouldDispatchShortcutTrigger({ settingsOpen: false, captureMode: true, testPending: false })).toBe(false);
+    expect(shouldDispatchShortcutTrigger({ settingsOpen: false, captureMode: false, testPending: false })).toBe(true);
+  });
+
+  it('still allows the explicit shortcut test while settings are open', () => {
+    expect(shouldDispatchShortcutTrigger({ settingsOpen: true, captureMode: false, testPending: true })).toBe(true);
   });
 });
