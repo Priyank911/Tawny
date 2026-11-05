@@ -1,4 +1,4 @@
-import { spawn, execSync, type ChildProcessWithoutNullStreams } from 'node:child_process';
+import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { app } from 'electron';
@@ -20,17 +20,7 @@ function getBinaryPath(): string {
   const altPath = join(__dirname, '../native/keywatcher.exe');
   if (existsSync(altPath)) return altPath;
 
-  // Try compiling if source exists
-  const csSource = join(__dirname, '../../src/main/native/keywatcher.cs');
-  if (existsSync(csSource)) {
-    try {
-      execSync(`"C:\\Windows\\Microsoft.NET\\Framework64\\v4.0.30319\\csc.exe" /nologo /optimize /target:exe /out:"${devPath}" "${csSource}"`, { windowsHide: true });
-      if (existsSync(devPath)) return devPath;
-    } catch {
-      // compilation failed
-    }
-  }
-
+  // Never compile at runtime: a missing helper is reported by the caller instead.
   return devPath;
 }
 

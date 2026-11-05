@@ -10,9 +10,9 @@ export const CLOUDFLARE_CLEF_BALANCED_MODEL = '@cf/meta/llama-3.3-70b-instruct-f
 
 export type ClefTier = 'fast' | 'low' | 'balanced';
 export type ClefMode = 'rewrite' | 'respond';
-export type ClefIntent = 'image_generate' | 'text_rewrite' | 'text_query' | 'plain_dictation';
+export type ClefIntent = 'image_generate' | 'text_rewrite' | 'text_query' | 'computer_control' | 'plain_dictation';
 
-const clefIntents: ClefIntent[] = ['image_generate', 'text_rewrite', 'text_query', 'plain_dictation'];
+const clefIntents: ClefIntent[] = ['image_generate', 'text_rewrite', 'text_query', 'computer_control', 'plain_dictation'];
 
 function isClefIntent(value: unknown): value is ClefIntent {
   return typeof value === 'string' && clefIntents.includes(value as ClefIntent);
@@ -55,6 +55,8 @@ export interface ClefDecisionResult {
   intent: ClefIntent;
   tier: ClefTier;
   confidence: number;
+  /** True when no model answered (missing credentials, offline, timeout) and the caller's fallback was returned. */
+  usedFallback?: boolean;
 }
 
 function parseModelTextResponse(body: unknown): string {
@@ -130,11 +132,9 @@ export function parseClefIntentDecision(body: unknown, fallbackIntent: ClefInten
     let topIntent: ClefIntent = fallbackIntent;
     let maxScore = -1;
     for (const [key, score] of Object.entries(intentScores)) {
-      if (typeof score === 'number' && score > maxScore) {
-        if (key === 'image_generate' || key === 'text_rewrite' || key === 'text_query' || key === 'plain_dictation') {
-          maxScore = score;
-          topIntent = key;
-        }
+      if (typeof score === 'number' && score > maxScore && isClefIntent(key)) {
+        maxScore = score;
+        topIntent = key;
       }
     }
     const tierScores = resultObj.tier && typeof resultObj.tier === 'object'
@@ -152,7 +152,7 @@ export function parseClefIntentDecision(body: unknown, fallbackIntent: ClefInten
       try {
         const parsed = JSON.parse(jsonMatch[0]) as { intent?: unknown; tier?: unknown; mode?: unknown };
         let intent: ClefIntent = fallbackIntent;
-        if (parsed.intent === 'image_generate' || parsed.intent === 'text_rewrite' || parsed.intent === 'text_query' || parsed.intent === 'plain_dictation') {
+        if (isClefIntent(parsed.intent)) {
           intent = parsed.intent;
         } else if (parsed.mode === 'rewrite') {
           intent = 'text_rewrite';
@@ -183,7 +183,7 @@ function cloudflareErrorDetail(body: unknown): string {
   return details.join('; ').slice(0, 240);
 }
 
-async function runCloudflareModel(
+export async function runCloudflareModel(
   accountId: string,
   apiToken: string,
   model: string,
@@ -244,7 +244,7 @@ export async function decideWithCloudflareClef(
   const selectedText = input.selectedText?.trim() ?? '';
 
   if (!accountId.trim() || !apiToken.trim() || !command) {
-    return { intent: fallbackIntent, tier: 'low', confidence: 1 };
+    return { intent: fallbackIntent, tier: 'low', confidence: 1, usedFallback: true };
   }
 
   const deciderState = [
@@ -262,7 +262,8 @@ export async function decideWithCloudflareClef(
         image_generate: 'User wants to generate, draw, design, or create an image or photo',
         text_rewrite: 'User selected text and asks to edit, rewrite, fix, translate, or transform it',
         text_query: 'User asks a question, requests code, or asks assistant to generate text from scratch',
-        plain_dictation: 'User is speaking normal speech to write directly at the cursor'
+        computer_control: 'User tells the assistant to operate the computer: open a folder, drive, app or website, switch to a window, click, scroll or press something on screen',
+        plain_dictation: 'User is speaking normal speech to write directly at the cursor, including any ordinary sentence that is not an instruction to the assistant'
       }
     },
     tier: {
@@ -293,7 +294,7 @@ export async function decideWithCloudflareClef(
   } catch (err) {
     // If Clef network call fails or times out, gracefully use fallback intent
     console.warn('CLEF decider network call failed; using fallback intent:', err instanceof Error ? err.message : err);
-    return { intent: fallbackIntent, tier: 'low', confidence: 0.75 };
+    return { intent: fallbackIntent, tier: 'low', confidence: 0.75, usedFallback: true };
   }
 }
 

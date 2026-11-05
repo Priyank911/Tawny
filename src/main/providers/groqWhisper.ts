@@ -53,6 +53,17 @@ function wait(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+/** File name sent with the upload. Groq decides the container from the extension, so it must match the audio. */
+export function audioFileName(mimeType: string, index: number): string {
+  const base = mimeType.split(';')[0].trim().toLowerCase();
+  const extension = base === 'audio/wav' || base === 'audio/x-wav' || base === 'audio/wave' ? 'wav'
+    : base === 'audio/ogg' ? 'ogg'
+    : base === 'audio/mp4' ? 'm4a'
+    : base === 'audio/mpeg' ? 'mp3'
+    : 'webm';
+  return `tawny-recording-${index + 1}.${extension}`;
+}
+
 export async function transcribeWithGroq(
   apiKey: string,
   audio: Uint8Array | readonly Uint8Array[],
@@ -76,7 +87,7 @@ export async function transcribeWithGroq(
     for (let attempt = 1; attempt <= MAX_TRANSCRIPTION_ATTEMPTS; attempt++) {
       // Recreate multipart data on each attempt; request bodies cannot safely be reused.
       const form = new FormData();
-      form.append('file', new Blob([audioBuffer], { type: mimeType }), `tawny-recording-${index + 1}.webm`);
+      form.append('file', new Blob([audioBuffer], { type: mimeType }), audioFileName(mimeType, index));
       form.append('model', 'whisper-large-v3-turbo');
       form.append('response_format', 'json');
       form.append('temperature', '0');

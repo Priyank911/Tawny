@@ -1,4 +1,4 @@
-import type { AuthProfile, HotkeyStatus, HotkeyTestResult, OverlaySnapshot, PipelineLog, ProviderSettings, UpdateNotice } from '../shared/contracts';
+import type { AuthProfile, BehaviorSettings, HandsFreeStatus, HotkeyStatus, HotkeyTestResult, OverlaySnapshot, PipelineLog, ProviderSettings, UpdateNotice } from '../shared/contracts';
 
 declare module '*.css';
 
@@ -33,6 +33,11 @@ declare global {
       openReleasePage: () => Promise<void>;
       installUpdate: () => Promise<void>;
       onUpdateState: (listener: (notice: UpdateNotice) => void) => () => void;
+      getBehavior: () => Promise<BehaviorSettings>;
+      saveBehavior: (behavior: BehaviorSettings) => Promise<BehaviorSettings>;
+      getHandsFree: () => Promise<HandsFreeStatus>;
+      onHandsFree: (listener: (status: HandsFreeStatus) => void) => () => void;
+      respondConfirm: (approved: boolean) => void;
       send: (event: 'HOTKEY' | 'STOP' | 'CANCEL' | 'CONFIRM') => void;
       subscribe: (listener: (snapshot: OverlaySnapshot) => void) => () => void;
     };

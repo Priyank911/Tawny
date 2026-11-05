@@ -1,20 +1,30 @@
-import { app, BrowserWindow, clipboard, globalShortcut, ipcMain, Menu, nativeImage, Notification, screen, session, Tray } from 'electron';
+import { app, BrowserWindow, clipboard, globalShortcut, ipcMain, Menu, nativeImage, Notification, powerMonitor, screen, session, Tray } from 'electron';
+import { spawn } from 'node:child_process';
 import { join } from 'node:path';
 import { writeFile } from 'node:fs/promises';
 import { createActor } from 'xstate';
 import { pipelineMachine } from './pipeline/machine';
-import { gateTranscript } from './pipeline/gate';
-import { isExplicitTextQueryRequest, isFastRewriteRequest, isImageGenerationRequest, isTextRewriteRequest, stripFastRewritePrefix } from './pipeline/intent';
+import { gateTranscriptDetailed, splitWakePhrase, stripSendPhrase } from './pipeline/gate';
+import { heuristicRoute, needsSelectionCapture, reconcileIntent } from './pipeline/router';
 import { captureSelectedText, pasteImage, pasteText } from './inject';
-import { PipelineError, type AuthProfile, type HotkeyStatus, type HotkeyTestResult, type OverlaySnapshot, type UpdateNotice } from '../shared/contracts';
+import { PipelineError, type AuthProfile, type BehaviorSettings, type CaptureSource, type HandsFreeStatus, type HotkeyStatus, type HotkeyTestResult, type OverlaySnapshot, type UpdateNotice } from '../shared/contracts';
 import { readProviderSettings, saveProviderSettings } from './settings';
+import { DEFAULT_BEHAVIOR, readBehavior, writeBehavior } from './behavior';
+import { ControlService } from './control/controlService';
+import { assessPlan, type Plan, type PlanOrigin } from './control/actions';
+import { planWithCloudflare } from './control/planner';
+import { EngineHost, type EngineClip, type EngineStatus } from './engine/engineHost';
+import { WakeService } from './wake/wakeService';
+import type { ChildLike } from './native/lineProcess';
+import { resolveNativeBinary } from './native/binaries';
+import { encodeWav } from '../shared/audio/wav';
 import { generateWithCloudflareFlux } from './providers/cloudflareFlux';
 import { transcribeWithGroq } from './providers/groqWhisper';
 import {
   decideWithCloudflareClef,
   generateResponseWithCloudflareClef,
   rewriteWithCloudflareClef,
-  type ClefIntent
+  type ClefDecisionResult
 } from './providers/cloudflareClef';
 import { getRecentLogs, logPipeline, setLogSink } from './logger';
 import { startKeyWatcher, watchKeyRelease, cancelKeyReleaseWatch, makeWindowTopmost, stopKeyWatcher } from './keywatcherService';
@@ -53,6 +63,19 @@ let settingsReturnState: { background: boolean; bounds: { x: number; y: number; 
 let rendererRecoveryUsed = false;
 let settingsPanelOpen = false;
 let shortcutCaptureMode = false;
+let behavior: BehaviorSettings = DEFAULT_BEHAVIOR;
+const control = new ControlService();
+const engine = new EngineHost();
+let wake: WakeService | undefined;
+let handsFreeStatus: HandsFreeStatus = { enabled: false, state: 'off', message: 'Hands-free is off.' };
+let wakeSessionActive = false;
+let engineRestarts = 0;
+let engineRestartTimer: NodeJS.Timeout | undefined;
+let controlAbort: AbortController | undefined;
+let pendingConfirm: { resolve: (approved: boolean) => void; timer: NodeJS.Timeout } | undefined;
+let confirmKeyRegistered = false;
+let clickThrough = false;
+let lastRmsSent = 0;
 const isWayland = isWaylandSession(process.platform, process.env);
 const updateNotificationsShown = new Set<string>();
 let pendingCliTrigger = process.argv.includes('--trigger');
@@ -103,10 +126,16 @@ function handleShortcutTrigger(): void {
     return;
   }
 
+  if (pendingConfirm) {
+    logPipeline({ event: 'hotkey.confirm', message: 'Global shortcut received; confirming action.', jobId: activeJobId, stage: 'decide' });
+    resolveConfirmation(true);
+    return;
+  }
+
   if (snapshot.state === 'idle' || snapshot.state === 'done' || snapshot.state === 'failed' || snapshot.state === 'cancelled') {
     stopPending = false;
     activeJobId = `job-${Date.now().toString(36)}`;
-    snapshot = { ...snapshot, imageDataUrl: undefined, message: undefined, intent: undefined };
+    snapshot = { ...snapshot, imageDataUrl: undefined, message: undefined, intent: undefined, confirmMessage: undefined, source: 'hotkey' };
     pendingSelectedTextPromise = captureSelectedText().catch(() => '');
     logPipeline({ event: 'hotkey.start', message: `Shortcut ${activeShortcut} received; starting audio capture.`, jobId: activeJobId, stage: 'capture' });
     actor.send({ type: 'HOTKEY' });
@@ -382,6 +411,12 @@ function openLogs(): void {
 }
 
 function stopRecording(): void {
+  if (snapshot.source === 'wake' && wakeSessionActive) {
+    // Hands-free capture ends in the audio engine; the clip arrives through handleWakeClip.
+    logPipeline({ event: 'capture.stop', message: 'Finishing the hands-free capture on request.', jobId: activeJobId, stage: 'capture' });
+    engine.endSession('send_it');
+    return;
+  }
   if (snapshot.state !== 'recording') {
     if (snapshot.state === 'arming') {
       stopPending = true;
@@ -477,6 +512,15 @@ actor.subscribe((state) => {
     data: { state: nextState }
   });
   setEscapeShortcut(state.value !== 'idle');
+  if (nextState === 'cancelled' || nextState === 'failed' || nextState === 'idle' || nextState === 'done') {
+    resolveConfirmation(false);
+    if (nextState !== 'done') controlAbort?.abort();
+  }
+  if ((nextState === 'cancelled' || nextState === 'failed' || nextState === 'idle') && wakeSessionActive) {
+    // The person cancelled (or the job failed) while the engine was still capturing: stop it quietly.
+    engine.endSession('cancelled');
+  }
+  applyClickThrough();
   mainWindow?.webContents.send('overlay:update', snapshot);
   if (state.value === 'idle' && backgroundMode && mainWindow?.isVisible()) {
     const windowRef = mainWindow;
@@ -529,6 +573,7 @@ ipcMain.handle('auth:get-profile', async () => {
 ipcMain.handle('auth:sign-in', async () => {
   try {
     authProfile = await startGoogleSignIn();
+    syncHandsFree();
     logPipeline({ event: 'auth.sign-in.success', message: 'Google sign-in completed with Firebase.' });
     mainWindow?.webContents.send('auth:profile', authProfile);
     return authProfile;
@@ -541,6 +586,7 @@ ipcMain.handle('auth:cancel', async () => cancelGoogleSignIn());
 ipcMain.handle('auth:sign-out', async () => {
   await signOut();
   authProfile = undefined;
+  syncHandsFree();
   logPipeline({ event: 'auth.sign-out', message: 'The local Firebase session was removed from this device.' });
   mainWindow?.webContents.send('auth:profile', undefined);
 });
@@ -623,12 +669,136 @@ ipcMain.handle('image:generate', async (_event, prompt: unknown) => {
   }
 });
 
-ipcMain.handle('audio:transcribe', async (_event, audio: Uint8Array | Uint8Array[]) => {
+// ---------------------------------------------------------------------------
+// Confirmation: one mechanism for "are you sure" before a risky step. It is
+// answered by Enter, the global shortcut, or the overlay buttons, and refused
+// by Escape or a 12 second timeout. Nothing risky runs without an answer.
+// ---------------------------------------------------------------------------
+
+function setConfirmKey(enabled: boolean): void {
+  if (enabled && !confirmKeyRegistered) {
+    confirmKeyRegistered = globalShortcut.register('Enter', () => resolveConfirmation(true));
+  } else if (!enabled && confirmKeyRegistered) {
+    globalShortcut.unregister('Enter');
+    confirmKeyRegistered = false;
+  }
+}
+
+function askConfirmation(message: string): Promise<boolean> {
+  resolveConfirmation(false);
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => resolveConfirmation(false), 12_000);
+    pendingConfirm = { resolve, timer };
+    snapshot = { ...snapshot, confirmMessage: message };
+    applyClickThrough();
+    mainWindow?.webContents.send('overlay:update', snapshot);
+    setConfirmKey(true);
+    logPipeline({ event: 'control.confirm', message: `Waiting for confirmation: ${message}`, jobId: activeJobId, stage: 'decide' });
+  });
+}
+
+function resolveConfirmation(approved: boolean): void {
+  const pending = pendingConfirm;
+  if (!pending) return;
+  pendingConfirm = undefined;
+  clearTimeout(pending.timer);
+  setConfirmKey(false);
+  snapshot = { ...snapshot, confirmMessage: undefined };
+  mainWindow?.webContents.send('overlay:update', snapshot);
+  pending.resolve(approved);
+  if (snapshot.state === 'confirming') actor.send({ type: approved ? 'CONFIRM' : 'CANCEL' });
+}
+
+/** While Tawny drives the mouse, the overlay must not catch the clicks it is sending to the app underneath. */
+function applyClickThrough(): void {
+  const wakeOrb = snapshot.source === 'wake' && (snapshot.state === 'arming' || snapshot.state === 'recording');
+  const driving = snapshot.intent === 'computer_control' && snapshot.state === 'handling' && !snapshot.confirmMessage;
+  const wanted = wakeOrb || driving;
+  if (wanted === clickThrough) return;
+  clickThrough = wanted;
+  mainWindow?.setIgnoreMouseEvents(wanted, { forward: false });
+}
+
+ipcMain.on('confirm:respond', (_event, approved: unknown) => {
+  if (typeof approved === 'boolean') resolveConfirmation(approved);
+});
+
+// ---------------------------------------------------------------------------
+// Computer control (Path E)
+// ---------------------------------------------------------------------------
+
+async function runComputerControl(input: { plan?: Plan; spoken: string; accountId: string; apiToken: string }): Promise<void> {
+  const unavailable = control.unavailableReason();
+  if (unavailable) throw new PipelineError('environment', 'handle', unavailable);
+  const abort = new AbortController();
+  controlAbort = abort;
+  try {
+    let plan = input.plan;
+    let origin: PlanOrigin = 'grammar';
+    if (!plan) {
+      origin = 'planner';
+      snapshot = { ...snapshot, message: 'Working out the steps…' };
+      mainWindow?.webContents.send('overlay:update', snapshot);
+      const context = await control.plannerContext().catch(() => ({ windows: [], drives: [] }));
+      const planned = await planWithCloudflare(input.accountId, input.apiToken, input.spoken, context, abort.signal);
+      if (!planned.ok) throw new PipelineError('input', 'decide', planned.reason);
+      plan = planned.plan;
+    }
+    logPipeline({ event: 'control.plan', message: `Plan from ${origin}: ${plan.steps.map((step) => step.verb).join(' > ')}`, jobId: activeJobId, stage: 'decide', data: { origin, steps: String(plan.steps.length) } });
+
+    const assessment = assessPlan(plan, origin);
+    if (assessment.blocked) throw new PipelineError('permanent', 'decide', assessment.blocked);
+    if (assessment.confirm) {
+      actor.send({ type: 'STAGE', stage: 'confirming' });
+      const approved = await askConfirmation(assessment.confirm);
+      if (!approved) return; // Escape or timeout already moved the pipeline to cancelled.
+    } else {
+      actor.send({ type: 'STAGE', stage: 'handling' });
+    }
+
+    const result = await control.run({
+      plan,
+      signal: abort.signal,
+      style: behavior.controlStyle,
+      ...(behavior.visionFallback && input.accountId && input.apiToken ? { vision: { accountId: input.accountId, apiToken: input.apiToken } } : {}),
+      confirm: askConfirmation,
+      progress: (message) => {
+        snapshot = { ...snapshot, message };
+        mainWindow?.webContents.send('overlay:update', snapshot);
+      },
+      note: (event, message) => logPipeline({ event: `control.${event}`, message, jobId: activeJobId, stage: 'handle' })
+    });
+    logPipeline({ level: result.ok ? 'info' : 'warn', event: result.ok ? 'control.done' : 'control.failed', message: result.message, jobId: activeJobId, stage: 'handle' });
+    snapshot = { ...snapshot, message: result.message };
+    if (result.ok) actor.send({ type: 'SUCCESS', message: result.message });
+    else actor.send({ type: 'FAIL', message: result.message });
+  } finally {
+    if (controlAbort === abort) controlAbort = undefined;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Shared audio pipeline. The hotkey path (browser recording, webm) and the
+// hands-free path (engine clip, wav) both end here.
+// ---------------------------------------------------------------------------
+
+interface ProcessOptions {
+  source: CaptureSource;
+  mimeType: string;
+}
+
+function discardJob(reason: string): void {
+  logPipeline({ event: 'job.discarded', message: reason, jobId: activeJobId, stage: 'gate' });
+  snapshot = { ...snapshot, message: undefined, intent: undefined, confirmMessage: undefined };
+  actor.send({ type: 'DISCARD' });
+}
+
+async function processAudio(segments: Uint8Array[], options: ProcessOptions): Promise<string> {
   if (!authProfile) throw new Error('Sign in with Google before using Tawny.');
   const startedAt = Date.now();
   const settings = await readProviderSettings();
-  const segments = Array.isArray(audio) ? audio : [audio];
   const totalBytes = segments.reduce((total, segment) => total + (segment?.byteLength ?? 0), 0);
+  const wakeSource = options.source === 'wake';
   actor.send({ type: 'STAGE', stage: 'transcribing' });
   logPipeline({
     event: 'provider.start',
@@ -636,11 +806,17 @@ ipcMain.handle('audio:transcribe', async (_event, audio: Uint8Array | Uint8Array
     jobId: activeJobId,
     stage: 'stt',
     provider: 'groq-whisper',
-    data: { bytes: String(totalBytes), segments: String(segments.length) }
+    data: { bytes: String(totalBytes), segments: String(segments.length), source: options.source }
   });
   try {
-    const transcript = await transcribeWithGroq(settings.groqApiKey, segments);
-    if (!transcript) throw new Error('Groq returned an empty transcript.');
+    const transcript = await transcribeWithGroq(settings.groqApiKey, segments, options.mimeType);
+    if (!transcript) {
+      if (wakeSource) {
+        discardJob('The hands-free clip had no recognizable speech.');
+        return '';
+      }
+      throw new Error('Groq returned an empty transcript.');
+    }
     logPipeline({
       event: 'provider.success',
       message: 'Groq Whisper returned a transcript.',
@@ -654,23 +830,34 @@ ipcMain.handle('audio:transcribe', async (_event, audio: Uint8Array | Uint8Array
     mainWindow?.webContents.send('overlay:update', snapshot);
 
     actor.send({ type: 'STAGE', stage: 'gating' });
-    const gate = gateTranscript(transcript);
+    // Hands-free clips must open with a real wake phrase: the local recognizer only suggests a wake, this check confirms it.
+    const spoken = wakeSource ? stripSendPhrase(transcript).text : transcript;
+    const gate = wakeSource
+      ? (() => {
+        const split = splitWakePhrase(spoken);
+        return { routed: split.routed, text: split.command, original: split.original };
+      })()
+      : gateTranscriptDetailed(transcript);
     logPipeline({
       event: 'gate.result',
       message: gate.routed ? 'Wake phrase accepted.' : 'Wake phrase not detected.',
       jobId: activeJobId,
       stage: 'gate',
-      data: { routed: String(gate.routed), commandLength: String(gate.text.length) }
+      data: { routed: String(gate.routed), commandLength: String(gate.text.length), source: options.source }
     });
+    if (wakeSource && (!gate.routed || !gate.text)) {
+      discardJob(gate.routed ? 'Hey Tawny was said with no command after it.' : 'The speech did not start with a wake phrase; nothing was done.');
+      return '';
+    }
 
     actor.send({ type: 'STAGE', stage: 'deciding' });
 
-    const initialCommand = (gate.routed && gate.text ? gate.text : transcript).trim();
-
-    // 1. Retrieve selected text captured when hotkey was first pressed
+    // Selected text: the hotkey path captured it when the key was pressed. A hands-free command captures it only when it could be an edit.
     let selectedText = '';
     try {
-      selectedText = (await pendingSelectedTextPromise) || '';
+      selectedText = wakeSource
+        ? (needsSelectionCapture(gate.original, gate.text) ? await captureSelectedText() : '')
+        : (await pendingSelectedTextPromise) || '';
       logPipeline({
         event: 'selection.capture',
         message: selectedText ? 'Selected text captured from the focused app.' : 'No active text selection was detected.',
@@ -688,63 +875,46 @@ ipcMain.handle('audio:transcribe', async (_event, audio: Uint8Array | Uint8Array
       });
     }
 
-    const fastRewriteRequested = Boolean(selectedText) && isFastRewriteRequest(initialCommand);
-    const routedCommand = fastRewriteRequested ? stripFastRewritePrefix(initialCommand) : initialCommand;
-
-    // 2. Compute baseline heuristic fallback
-    const isImageHeuristic = isImageGenerationRequest(routedCommand) || isImageGenerationRequest(transcript);
-    const isRewriteHeuristic = Boolean(selectedText) && isTextRewriteRequest(routedCommand);
-    const isCodeOrQueryHeuristic = !isImageHeuristic && !isRewriteHeuristic && isExplicitTextQueryRequest(routedCommand);
-    let fallbackIntent: ClefIntent = 'plain_dictation';
-    if (isImageHeuristic) fallbackIntent = 'image_generate';
-    else if (isRewriteHeuristic) fallbackIntent = 'text_rewrite';
-    else if (isCodeOrQueryHeuristic) fallbackIntent = 'text_query';
-
-    // 3. Use Cloudflare CLEF only when the command explicitly needs a model.
-    // Plain dictation must stay local after Whisper transcription so a normal
-    // sentence can never turn into an assistant-generated response.
-    const shouldUseClef = !fastRewriteRequested && (isImageHeuristic || isRewriteHeuristic || isCodeOrQueryHeuristic);
-    const clefDecision = fastRewriteRequested
-      ? { intent: 'text_rewrite' as const, tier: 'fast' as const, confidence: 1 }
-      : shouldUseClef
-      ? await decideWithCloudflareClef(
-          settings.cloudflareAccountId,
-          settings.cloudflareApiToken,
-          { command: routedCommand, selectedText },
-          fallbackIntent
-        )
-        : { intent: 'plain_dictation' as const, tier: 'low' as const, confidence: 1 };
-
-    // CLEF is the primary decider. Deterministic lexical guardrails protect
-    // explicit image requests and edits of selected text when a response is
-    // ambiguous or the decider is temporarily unavailable.
-    let resolvedIntent = clefDecision.intent;
-    if (isImageHeuristic) resolvedIntent = 'image_generate';
-    else if (isRewriteHeuristic) resolvedIntent = 'text_rewrite';
-    else if (isCodeOrQueryHeuristic) resolvedIntent = 'text_query';
-    else resolvedIntent = 'plain_dictation';
+    // Deterministic guardrails first; CLEF picks the tier for them, or classifies speech that was addressed to Tawny.
+    const route = heuristicRoute({
+      transcript,
+      source: options.source,
+      gateRouted: gate.routed,
+      gateCommand: gate.text,
+      gateOriginal: gate.original,
+      selectedText
+    });
+    let decision: ClefDecisionResult | undefined;
+    if (route.fastRewrite) decision = { intent: 'text_rewrite', tier: 'fast', confidence: 1 };
+    else if (route.consult !== 'none') {
+      decision = await decideWithCloudflareClef(settings.cloudflareAccountId, settings.cloudflareApiToken, { command: route.command, selectedText }, route.intent);
+    }
+    const tier = decision?.tier ?? 'low';
+    const resolved = reconcileIntent(route, decision, selectedText);
+    const intent = resolved.intent;
+    const routedCommand = route.command;
 
     logPipeline({
       event: 'decision.result',
-      message: shouldUseClef
-        ? `CLEF decided intent: ${resolvedIntent} (${clefDecision.tier} tier)`
-        : 'Plain dictation detected; no model response requested.',
+      message: route.consult === 'none' && !route.matched
+        ? 'Plain dictation detected; no model response requested.'
+        : `Intent: ${intent} (${resolved.reason})`,
       jobId: activeJobId,
       stage: 'decide',
       data: {
-        intent: resolvedIntent,
-        clefIntent: clefDecision.intent,
-        tier: clefDecision.tier,
-        confidence: String(clefDecision.confidence),
-        modelRouting: String(shouldUseClef)
+        intent,
+        reason: resolved.reason,
+        guardrail: String(route.matched),
+        tier,
+        ...(decision ? { confidence: String(decision.confidence), clefIntent: decision.intent } : {})
       }
     });
 
-    snapshot = { ...snapshot, intent: resolvedIntent };
+    snapshot = { ...snapshot, intent };
     mainWindow?.webContents.send('overlay:update', snapshot);
 
     // Path A: Image generation
-    if (resolvedIntent === 'image_generate') {
+    if (intent === 'image_generate') {
       const promptText = routedCommand || transcript;
       actor.send({ type: 'STAGE', stage: 'handling' });
       const image = await generateWithCloudflareFlux(settings.cloudflareAccountId, settings.cloudflareApiToken, { prompt: promptText });
@@ -762,13 +932,13 @@ ipcMain.handle('audio:transcribe', async (_event, audio: Uint8Array | Uint8Array
     }
 
     // Path B: Text rewrite on selected text
-    if (resolvedIntent === 'text_rewrite' && selectedText) {
+    if (intent === 'text_rewrite' && selectedText) {
       const commandText = routedCommand || transcript;
       actor.send({ type: 'STAGE', stage: 'handling' });
       const rewrite = await rewriteWithCloudflareClef(
         settings.cloudflareAccountId,
         settings.cloudflareApiToken,
-        { selectedText, command: commandText, tier: clefDecision.tier }
+        { selectedText, command: commandText, tier }
       );
       logPipeline({
         event: 'provider.success',
@@ -789,13 +959,13 @@ ipcMain.handle('audio:transcribe', async (_event, audio: Uint8Array | Uint8Array
     }
 
     // Path C: Text query / code generation (e.g. "give me python code for making calculator")
-    if (resolvedIntent === 'text_query') {
+    if (intent === 'text_query') {
       const commandText = routedCommand || transcript;
       actor.send({ type: 'STAGE', stage: 'handling' });
       const responseText = await generateResponseWithCloudflareClef(
         settings.cloudflareAccountId,
         settings.cloudflareApiToken,
-        { command: commandText, context: selectedText, tier: clefDecision.tier }
+        { command: commandText, context: selectedText, tier }
       );
       logPipeline({
         event: 'provider.success',
@@ -803,7 +973,7 @@ ipcMain.handle('audio:transcribe', async (_event, audio: Uint8Array | Uint8Array
         jobId: activeJobId,
         stage: 'handle',
         provider: 'cloudflare-clef',
-        data: { tier: clefDecision.tier }
+        data: { tier }
       });
       actor.send({ type: 'STAGE', stage: 'injecting' });
       const pasteResult = await pasteText(responseText);
@@ -815,16 +985,28 @@ ipcMain.handle('audio:transcribe', async (_event, audio: Uint8Array | Uint8Array
       return responseText;
     }
 
+    // Path E: Computer control (open things, click, type, press keys)
+    if (intent === 'computer_control') {
+      await runComputerControl({
+        ...(route.control ? { plan: route.control } : {}),
+        spoken: gate.original || routedCommand,
+        accountId: settings.cloudflareAccountId,
+        apiToken: settings.cloudflareApiToken
+      });
+      return transcript;
+    }
+
     // Path D: Normal sentence / dictation input: paste text directly at cursor pointer
     logPipeline({ event: 'decision.result', message: 'Dictation intent detected; pasting text at cursor.', jobId: activeJobId, stage: 'decide', data: { intent: 'plain_text' } });
     actor.send({ type: 'STAGE', stage: 'injecting' });
-    const pasteResult = await pasteText(transcript);
+    const dictation = wakeSource ? gate.original : transcript;
+    const pasteResult = await pasteText(dictation);
     const completionMessage = pasteResult === 'clipboard' ? notifyClipboardOnly('text') : 'Dictation complete.';
     logPipeline({ event: 'inject.success', message: pasteResult === 'clipboard' ? 'Dictation is on the clipboard; Wayland did not permit automatic paste.' : 'Dictation pasted into the previously focused application.', jobId: activeJobId, stage: 'inject' });
     snapshot = { ...snapshot, message: completionMessage };
     mainWindow?.webContents.send('overlay:update', snapshot);
     actor.send({ type: 'SUCCESS', message: completionMessage });
-    return transcript;
+    return dictation;
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Groq transcription failed.';
     const pipelineError = error instanceof PipelineError ? error : undefined;
@@ -841,8 +1023,171 @@ ipcMain.handle('audio:transcribe', async (_event, audio: Uint8Array | Uint8Array
     actor.send({ type: 'FAIL', message });
     throw error;
   }
+}
+
+ipcMain.handle('audio:transcribe', (_event, audio: Uint8Array | Uint8Array[]) => {
+  const segments = Array.isArray(audio) ? audio : [audio];
+  return processAudio(segments, { source: 'hotkey', mimeType: 'audio/webm' });
 });
+
 ipcMain.on('pipeline:event', (_event, event: 'HOTKEY' | 'STOP' | 'CANCEL' | 'CONFIRM') => handlePipelineEvent(event));
+
+// ---------------------------------------------------------------------------
+// Hands-free mode: a local recognizer suggests "hey tawny", the audio engine
+// captures the utterance, and Whisper confirms it before anything happens.
+// ---------------------------------------------------------------------------
+
+function publishHandsFree(status: HandsFreeStatus): void {
+  handsFreeStatus = status;
+  mainWindow?.webContents.send('handsfree:status', status);
+  tray?.setToolTip(status.state === 'listening' ? 'Tawny (hands-free listening)' : 'Tawny');
+}
+
+function startWakeSession(): void {
+  if (!authProfile || !behavior.handsFree || !mainWindow) return;
+  const free = snapshot.state === 'idle' || snapshot.state === 'done' || snapshot.state === 'failed';
+  if (!free || wakeSessionActive || pendingConfirm || settingsPanelOpen) {
+    logPipeline({ event: 'wake.ignored', message: 'A wake phrase was heard while Tawny was busy; ignored.', data: { state: snapshot.state } });
+    return;
+  }
+  if (!engine.beginSession()) {
+    logPipeline({ level: 'warn', event: 'wake.engine_unavailable', message: 'A wake phrase was heard but the audio engine is not running.' });
+    return;
+  }
+  wakeSessionActive = true;
+  stopPending = false;
+  activeJobId = `job-${Date.now().toString(36)}`;
+  snapshot = { ...snapshot, imageDataUrl: undefined, message: undefined, intent: undefined, confirmMessage: undefined, source: 'wake', rms: 0 };
+  logPipeline({ event: 'wake.start', message: 'Wake phrase heard; listening for the command.', jobId: activeJobId, stage: 'capture' });
+  actor.send({ type: 'HOTKEY' });
+  showOverlay();
+  actor.send({ type: 'AUDIO_READY' });
+}
+
+function handleWakeClip(clip: EngineClip): void {
+  if (!wakeSessionActive) return;
+  wakeSessionActive = false;
+  wake?.sessionEnded();
+  if (snapshot.source !== 'wake' || snapshot.state !== 'recording') return; // cancelled or replaced while capturing
+  if (clip.reason === 'cancelled' || clip.reason === 'no_command') {
+    discardJob(clip.reason === 'no_command' ? 'Hey Tawny was heard but no command followed.' : 'The hands-free capture was cancelled.');
+    return;
+  }
+  logPipeline({ event: 'wake.clip', message: `Hands-free capture finished (${clip.reason}).`, jobId: activeJobId, stage: 'capture', data: { durationMs: String(clip.durationMs), voicedMs: String(clip.commandVoicedMs) } });
+  actor.send({ type: 'STOP' });
+  void processAudio([encodeWav(clip.samples)], { source: 'wake', mimeType: 'audio/wav' }).catch(() => undefined);
+}
+
+/** The engine went away mid-capture (error, sleep, lock): drop the half-heard command instead of leaving the pipeline stuck. */
+function abandonWakeSession(): void {
+  if (!wakeSessionActive) return;
+  wakeSessionActive = false;
+  wake?.sessionEnded();
+  if (snapshot.source === 'wake' && (snapshot.state === 'arming' || snapshot.state === 'recording')) discardJob('The microphone stopped while Tawny was listening.');
+}
+
+function ensureWake(): WakeService | undefined {
+  if (wake) return wake;
+  const binary = resolveNativeBinary('tawny-wake.exe', process.resourcesPath, app.getAppPath());
+  if (!binary) return undefined;
+  wake = new WakeService({
+    spawner: () => spawn(binary, [], { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] }) as unknown as ChildLike
+  });
+  wake.on('status', (status: HandsFreeStatus) => {
+    if (engineFailed) return;
+    publishHandsFree(status);
+  });
+  wake.on('wake', startWakeSession);
+  wake.on('send', () => {
+    if (wakeSessionActive) {
+      logPipeline({ event: 'wake.send', message: 'Send phrase heard; finishing the capture.', jobId: activeJobId, stage: 'capture' });
+      engine.endSession('send_it');
+    }
+  });
+  wake.on('throttled', (signal: { reason: string }) => {
+    logPipeline({ level: 'warn', event: 'wake.throttled', message: `A wake phrase was ignored (${signal.reason}).` });
+  });
+  return wake;
+}
+
+let engineFailed = false;
+
+function onEngineStatus(status: EngineStatus): void {
+  if (status.state === 'running') {
+    engineRestarts = 0;
+    engineFailed = false;
+    if (wake) publishHandsFree(wake.current);
+    return;
+  }
+  if (status.state !== 'error' || !behavior.handsFree) return;
+  abandonWakeSession();
+  engine.stop();
+  if (engineRestarts >= 3) {
+    engineFailed = true;
+    publishHandsFree({ enabled: true, state: 'error', message: status.message ?? 'The microphone could not be started.' });
+    return;
+  }
+  engineRestarts += 1;
+  logPipeline({ level: 'warn', event: 'handsfree.engine.restart', message: `${status.message ?? 'The audio engine stopped'}; retrying (${engineRestarts}/3).` });
+  if (engineRestartTimer) clearTimeout(engineRestartTimer);
+  engineRestartTimer = setTimeout(() => {
+    engineRestartTimer = undefined;
+    if (behavior.handsFree && authProfile) engine.start();
+  }, 2000 * engineRestarts);
+}
+
+function startHandsFree(): void {
+  if (process.platform !== 'win32') {
+    publishHandsFree({ enabled: true, state: 'error', message: 'Hands-free is available on Windows only.' });
+    return;
+  }
+  const service = ensureWake();
+  if (!service) {
+    publishHandsFree({ enabled: true, state: 'error', message: 'Hands-free needs tawny-wake.exe, which is missing from this install. Reinstall Tawny to restore it.' });
+    return;
+  }
+  engineFailed = false;
+  engineRestarts = 0;
+  service.start();
+  engine.start();
+  void control.prewarm();
+}
+
+function stopHandsFree(): void {
+  if (engineRestartTimer) clearTimeout(engineRestartTimer);
+  engineRestartTimer = undefined;
+  abandonWakeSession();
+  wake?.stop();
+  engine.stop();
+  publishHandsFree({ enabled: false, state: 'off', message: 'Hands-free is off.' });
+}
+
+/** Hands-free runs only while it is switched on and someone is signed in. */
+function syncHandsFree(): void {
+  if (behavior.handsFree && authProfile) startHandsFree();
+  else if (handsFreeStatus.state !== 'off') stopHandsFree();
+}
+
+engine.on('clip', handleWakeClip);
+engine.on('status', onEngineStatus);
+engine.on('rms', (value: number) => {
+  if (!wakeSessionActive || snapshot.state !== 'recording') return;
+  const now = Date.now();
+  if (now - lastRmsSent < 50) return;
+  lastRmsSent = now;
+  snapshot = { ...snapshot, rms: value };
+  mainWindow?.webContents.send('overlay:update', snapshot);
+});
+
+ipcMain.handle('behavior:get', () => behavior);
+ipcMain.handle('behavior:save', async (_event, value: unknown) => {
+  const previous = behavior;
+  behavior = await writeBehavior(app.getPath('userData'), value);
+  if (behavior.handsFree !== previous.handsFree) syncHandsFree();
+  logPipeline({ event: 'behavior.saved', message: 'Behavior settings saved.', data: { handsFree: String(behavior.handsFree), controlStyle: behavior.controlStyle, vision: String(behavior.visionFallback) } });
+  return behavior;
+});
+ipcMain.handle('handsfree:get', () => handsFreeStatus);
 
 onUpdateAvailable((notice: UpdateNotice) => {
   mainWindow?.webContents.send('updates:state', notice);
@@ -861,6 +1206,7 @@ onUpdateAvailable((notice: UpdateNotice) => {
 
 setAuthSessionInvalidatedHandler(() => {
   authProfile = undefined;
+  syncHandsFree();
   logPipeline({ level: 'warn', event: 'auth.session.expired', message: 'The saved Firebase session is no longer valid; Google sign-in is required.' });
   mainWindow?.webContents.send('auth:profile', undefined);
   mainWindow?.webContents.send('auth:required');
@@ -872,6 +1218,7 @@ app.whenReady().then(async () => {
   });
   if (process.platform === 'win32') app.setAppUserModelId('com.tawny.desktop');
   authProfile = await getAuthProfile();
+  behavior = await readBehavior(app.getPath('userData'));
   logPipeline({
     event: 'app.ready',
     message: `Tawny ${app.getVersion()} started on ${process.platform}.`,
@@ -891,6 +1238,25 @@ app.whenReady().then(async () => {
   createTray();
   activeShortcut = await readGlobalShortcut();
   registerGlobalShortcut(activeShortcut);
+  powerMonitor.on('lock-screen', () => {
+    abandonWakeSession();
+    wake?.pause('Paused while the screen is locked.');
+    engine.stop();
+  });
+  powerMonitor.on('unlock-screen', () => {
+    if (behavior.handsFree && authProfile) {
+      wake?.resume();
+      engine.start();
+    }
+  });
+  powerMonitor.on('suspend', () => { abandonWakeSession(); wake?.pause('Paused while the computer sleeps.'); engine.stop(); });
+  powerMonitor.on('resume', () => {
+    if (behavior.handsFree && authProfile) {
+      wake?.resume();
+      engine.start();
+    }
+  });
+  syncHandsFree();
   if (pendingCliTrigger) {
     pendingCliTrigger = false;
     setTimeout(handleShortcutTrigger, 350);
@@ -908,6 +1274,9 @@ app.on('will-quit', () => {
     pendingShortcutTest = undefined;
   }
   globalShortcut.unregisterAll();
+  wake?.stop();
+  engine.stop();
+  control.stop();
   stopKeyWatcher();
   escapeRegistered = false;
 });

@@ -20,13 +20,13 @@ export default defineConfig(({ mode }) => {
       plugins: [externalizeDepsPlugin()]
     },
     preload: {
-      build: { rollupOptions: { input: resolve('src/main/preload.ts') } },
+      build: { rollupOptions: { input: { preload: resolve('src/main/preload.ts'), enginePreload: resolve('src/main/enginePreload.ts') } } },
       plugins: [externalizeDepsPlugin()]
     },
     renderer: {
       publicDir: resolve('public'),
       resolve: { alias: { '@renderer': resolve('src/renderer') } },
-      build: { rollupOptions: { input: resolve('src/renderer/index.html') } },
+      build: { rollupOptions: { input: { index: resolve('src/renderer/index.html'), engine: resolve('src/renderer/engine.html') } } },
       plugins: [react()]
     }
   };

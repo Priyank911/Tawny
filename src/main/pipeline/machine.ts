@@ -13,6 +13,7 @@ export type PipelineEvent =
   | { type: 'AUDIO_READY' }
   | { type: 'STOP' }
   | { type: 'CANCEL' }
+  | { type: 'DISCARD' }
   | { type: 'STAGE'; stage: OverlayState }
   | { type: 'CONFIRM' }
   | { type: 'SUCCESS'; message?: string }
@@ -27,6 +28,7 @@ export const pipelineMachine = createMachine({
     idle: { on: { HOTKEY: 'arming' } },
     arming: {
       on: {
+        DISCARD: 'idle',
         AUDIO_READY: 'recording',
         CANCEL: 'cancelled',
         FAIL: { target: 'failed', actions: assign({ message: ({ event }) => event.message }) }
@@ -34,6 +36,7 @@ export const pipelineMachine = createMachine({
     },
     recording: {
       on: {
+        DISCARD: 'idle',
         STOP: 'finalizing',
         CANCEL: 'cancelled',
         FAIL: { target: 'failed', actions: assign({ message: ({ event }) => event.message }) }
@@ -41,6 +44,7 @@ export const pipelineMachine = createMachine({
     },
     finalizing: {
       on: {
+        DISCARD: 'idle',
         STAGE: [
           { guard: ({ event }) => event.stage === 'gating', target: 'gating' },
           { guard: ({ event }) => event.stage === 'deciding', target: 'deciding' },
@@ -53,6 +57,7 @@ export const pipelineMachine = createMachine({
     },
     transcribing: {
       on: {
+        DISCARD: 'idle',
         STAGE: [
           { guard: ({ event }) => event.stage === 'deciding', target: 'deciding' },
           { guard: ({ event }) => event.stage === 'handling', target: 'handling' },
@@ -66,6 +71,7 @@ export const pipelineMachine = createMachine({
     },
     gating: {
       on: {
+        DISCARD: 'idle',
         STAGE: [
           { guard: ({ event }) => event.stage === 'handling', target: 'handling' },
           { guard: ({ event }) => event.stage === 'injecting', target: 'injecting' },
@@ -78,6 +84,7 @@ export const pipelineMachine = createMachine({
     },
     deciding: {
       on: {
+        DISCARD: 'idle',
         STAGE: [
           { guard: ({ event }) => event.stage === 'handling', target: 'handling' },
           { guard: ({ event }) => event.stage === 'injecting', target: 'injecting' },
