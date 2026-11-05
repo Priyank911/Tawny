@@ -23,7 +23,7 @@ publish:
     repo: Tawny
     releaseType: prerelease
 win:
-  icon: tawny-mark.svg
+  icon: tawny-icon.png
   target:
     - target: nsis
       arch:

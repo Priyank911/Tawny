@@ -239,7 +239,7 @@ function createWindow(): void {
     skipTaskbar: false,
     alwaysOnTop: true,
     backgroundColor: '#00000000',
-    icon: join(__dirname, '../renderer/tawny-mark.svg'),
+    icon: join(__dirname, '../renderer/tawny-icon.png'),
     webPreferences: {
       preload: join(__dirname, '../preload/preload.js'),
       contextIsolation: true,
@@ -456,8 +456,8 @@ function setEscapeShortcut(enabled: boolean): void {
 }
 
 function createTray(): void {
-  const traySvg = '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 64 64"><rect width="64" height="64" rx="20" fill="#26302b"/><path d="M19 21h26M32 21v23" fill="none" stroke="#fff" stroke-width="6" stroke-linecap="round"/><path d="M16 38c3.5-4 7-4 10.5 0s7 4 10.5 0 7-4 10.5 0" fill="none" stroke="#91a77f" stroke-width="4" stroke-linecap="round"/></svg>';
-  tray = new Tray(nativeImage.createFromBuffer(Buffer.from(traySvg)));
+  // Electron cannot decode SVG on Windows, so the tray uses PNGs (1x and @2x) rendered from public/tawny-mark.svg.
+  tray = new Tray(nativeImage.createFromPath(join(__dirname, '../renderer/tawny-tray.png')));
   tray.setToolTip('Tawny');
   tray.setContextMenu(Menu.buildFromTemplate([
     {

@@ -1,6 +1,6 @@
 {
   "name": "voicerouter",
-  "version": "0.1.7",
+  "version": "0.1.8",
   "private": true,
   "description": "A hands-free voice layer for Windows: dictation, rewriting, image generation and voice-driven computer control.",
   "author": "Tawny",
