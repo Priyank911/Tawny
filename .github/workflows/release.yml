@@ -9,18 +9,8 @@ permissions:
 
 jobs:
   build:
-    name: Package ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: windows-latest
-            target: --win nsis --x64
-          - os: macos-latest
-            target: --mac dmg zip --x64 --arm64
-          - os: ubuntu-latest
-            target: --linux AppImage deb --x64
-    runs-on: ${{ matrix.os }}
+    name: Package Windows
+    runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -42,6 +32,8 @@ jobs:
           TAWNY_FIREBASE_PROJECT_ID: ${{ secrets.TAWNY_FIREBASE_PROJECT_ID }}
           TAWNY_GOOGLE_CLIENT_ID: ${{ secrets.TAWNY_GOOGLE_CLIENT_ID }}
           TAWNY_GOOGLE_CLIENT_SECRET: ${{ secrets.TAWNY_GOOGLE_CLIENT_SECRET }}
+      - name: Build and smoke-test the Windows helpers
+        run: pnpm build:native
       - run: pnpm typecheck
       - run: pnpm test
       - run: pnpm build
@@ -53,7 +45,7 @@ jobs:
       - name: Verify Firebase config reached the main-process bundle
         run: node scripts/verify-auth-build.mjs
       - name: Package unsigned installers
-        run: pnpm exec electron-builder ${{ matrix.target }} --publish never
+        run: pnpm exec electron-builder --win nsis --x64 --publish never
       - uses: actions/upload-artifact@v4
         with:
           name: release-${{ runner.os }}
@@ -61,10 +53,6 @@ jobs:
             release/*.exe
             release/*.blockmap
             release/*.nsis.7z
-            release/*.dmg
-            release/*.zip
-            release/*.deb
-            release/*.AppImage
             release/latest*.yml
           if-no-files-found: error
           retention-days: 7

@@ -6,7 +6,7 @@ This guide is for maintainers and contributors. End-user setup is in the [user g
 
 - Node.js 22
 - pnpm 10 (CI pins pnpm 10.28.2)
-- Windows, macOS, or Linux for platform development; native packaging should be run on its matching OS
+- Windows for the full build. Typecheck, tests and the renderer bundle also run on Linux and macOS, but the native helpers only compile on Windows.
 - Optional Groq and Cloudflare Workers AI credentials for manual provider verification
 - Firebase project/OAuth configuration for local sign-in development
 
@@ -57,7 +57,7 @@ pnpm build
 | `pnpm package` | Build and package unsigned installers for the current OS. |
 | `pnpm preview` | Preview the built Electron/Vite app. |
 
-GitHub Actions runs typecheck, tests, build, and native bundle packaging on Windows, macOS, and Ubuntu for pushes and pull requests.
+GitHub Actions runs on Windows only: it compiles and smoke-tests the native helpers (`pnpm build:native`), then typecheck, tests, build, and native bundle packaging.
 
 ## Release process
 
@@ -70,7 +70,7 @@ Before tagging, configure these Actions repository secrets:
 - `TAWNY_GOOGLE_CLIENT_ID`
 - `TAWNY_GOOGLE_CLIENT_SECRET`
 
-The workflow uses GitHub’s provided `GITHUB_TOKEN` for publishing. Code-signing certificates are not currently configured, so Windows/macOS previews remain unsigned and may show reputation/security warnings. Read the [install notes](./INSTALL-EARLY-PREVIEW.md) before distributing a build.
+The workflow uses GitHub’s provided `GITHUB_TOKEN` for publishing. Code-signing certificates are not currently configured, so Windows previews remain unsigned and may show reputation/security warnings. Read the [install notes](./INSTALL-EARLY-PREVIEW.md) before distributing a build.
 
 Release checklist:
 
@@ -78,7 +78,7 @@ Release checklist:
 2. Review `git status`, `git diff --check`, and the staged diff; confirm `.env` is ignored and not staged.
 3. Commit and push the source commit to `main`; confirm cross-platform CI passes.
 4. Create and push the exact matching version tag, such as `v0.2.0`.
-5. In GitHub **Actions → Early preview release**, wait for Windows, macOS, Ubuntu packaging and the publishing job to succeed.
+5. In GitHub **Actions → Early preview release**, wait for Windows packaging and the publishing job to succeed.
 6. Open GitHub **Releases** and verify the platform installers, update metadata, installation notes, and `SHA256SUMS` are attached.
 
 Do not re-push a tag for a different commit or overwrite an already-published release. If a release needs correction, increment the package version and publish a new tag.
@@ -87,4 +87,10 @@ Do not re-push a tag for a different commit or overwrite an already-published re
 
 Keep provider response parsing, intent helpers, and policy logic testable without network calls. Add deterministic Vitest coverage for both expected responses and failure cases. Do not include API credentials, audio, transcripts, or selected text in fixtures or logs.
 
-When opening a bug report, include the operating system, desktop session (X11/Wayland), Tawny version, reproduction steps, and sanitized event names/error messages. Never attach `.env`, `credentials.bin`, `auth-session.bin`, or an unredacted diagnostics file.
+When opening a bug report, include the Windows version, Tawny version, reproduction steps, and sanitized event names/error messages. Never attach `.env`, `credentials.bin`, `auth-session.bin`, or an unredacted diagnostics file.
+
+## Native helpers (Windows)
+
+`src/main/native/tawny-control.cs` (UI Automation, mouse, keyboard, windows, screenshots) and `tawny-wake.cs` (offline wake recognizer) are compiled by `pnpm build:native` with the .NET Framework 4 C# 5 compiler, outputting to `build/native`. Packaged builds ship them in `resources/native`. Nothing is compiled at runtime; a missing helper is reported in the overlay. Keep them to C# 5 syntax (no `$""`, `?.`, `nameof`, expression-bodied members).
+
+Protocol: the control helper reads one request per line (`<id>\t<command>\t<key>=<percent-encoded value>...`) and answers one JSON object per line. The wake helper prints JSON lines (`ready`, `hyp`, `final`, `error`).

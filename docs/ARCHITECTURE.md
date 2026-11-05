@@ -29,11 +29,11 @@ global shortcut / compositor --trigger
 
 The wake phrases in `src/main/pipeline/gate.ts` can be used to strip a leading phrase; they are not required for ordinary dictation. The full transcript remains the command if no wake phrase is recognized.
 
-Routing uses both local guardrails and CLEF:
+Routing (`src/main/pipeline/router.ts`) follows fixed rules, in priority order:
 
-1. Explicit local patterns identify image generation, edits when a selection exists, and explicit answer/code requests.
-2. CLEF is called only when one of those explicit intents is present. Ordinary dictation skips text generation.
-3. Deterministic local intent checks are authoritative guardrails for clear image/edit/query patterns and provide a fallback if CLEF is unavailable.
+1. Speech that was not addressed to Tawny (shortcut, no wake phrase) is plain dictation and never reaches a model.
+2. Deterministic guardrails win when they match: an explicit image request, an edit of selected text, an explicit answer/code request, or a control command the local grammar understands. CLEF then only chooses the model tier for those.
+3. Speech addressed to Tawny that no guardrail matched is classified by CLEF (`plain_dictation`, `text_rewrite`, `text_query`, `image_generate`, `computer_control`). A missing, failed or low-confidence (below 0.75) answer means dictation, never action.
 4. A `quick`/`fast` prefix on a selected-text rewrite skips the decider and chooses the fast model.
 
 For an edit, Tawny sends the spoken instruction and selected text together, validates/sanitizes the returned text, retries suspiciously incomplete rewrites once, then replaces the selection only with a complete result. For an answer/code request, selected text is optional context. Image output is saved as a JPEG under Electron `userData` and also written to the native image clipboard.
@@ -51,10 +51,12 @@ For an edit, Tawny sends the spoken instruction and selected text together, vali
 | `transcribing` | Upload audio to Groq | → `gating` |
 | `gating` | Normalize/strip optional wake phrase | → `deciding` |
 | `deciding` | Resolve plain dictation vs. explicit action | → `handling` or `injecting` |
-| `confirming` | Reserved state for confirmation-required action | confirm → `handling`; cancel → `cancelled` |
+| `confirming` | Waiting for an answer before a risky control step | Enter/shortcut → `handling`; Esc/12 s timeout → `cancelled` |
 | `handling` | Call text/image model | → `injecting` |
 | `injecting` | Clipboard write and OS paste attempt | success → `done` |
 | `done`, `failed`, `cancelled` | Show outcome and return to ready state | timed transition to `idle` |
+
+A `DISCARD` event returns a job to `idle` without any outcome flash. Hands-free uses it for clips that were not a real wake phrase.
 
 The UI receives sanitized snapshots and structured logs. Sensitive payload contents are not included in persisted pipeline logs.
 
@@ -76,16 +78,39 @@ CLEF calls time out after 15 seconds; text operations and image generation use 4
 - Selected-text capture snapshots clipboard formats, writes a temporary marker, requests `Ctrl+C`/`Cmd+C`, reads the selected text, then restores the snapshot.
 - Text/image results are written to the system clipboard before automatic paste is attempted.
 - Windows uses PowerShell `SendKeys` and a small native key watcher for release detection/topmost support.
-- macOS uses System Events through `osascript`; microphone and Accessibility/Automation permissions may be required.
-- Linux X11 uses `xdotool`. Wayland uses `wtype` when virtual-keyboard input is permitted; otherwise the result remains available on the clipboard.
-- Linux global shortcuts use Electron’s desktop portal on Wayland. The compositor `--trigger` command reaches the existing process through the single-instance handler.
+- Releases are Windows only. Source guards for macOS and Linux remain in `inject.ts` and the hotkey code but are not built, tested or shipped.
 - Settings and shortcut-capture state are tracked in the main process so incoming shortcut triggers cannot unexpectedly start voice capture while the user is editing settings.
+
+## Hands-free mode
+
+```text
+tawny-wake.exe (Windows speech recognizer, offline)  → hypotheses as text → WakeDetector (cooldown, rate limit)
+engine window (hidden, mic, 16 kHz AudioWorklet)     → CaptureCore: ring buffer, energy VAD, SessionEndpointer
+wake → engine.beginSession → clip (wake phrase + command) → WAV → Groq → splitWakePhrase (strict) → router
+```
+
+- The recognizer only suggests a wake; Whisper must confirm that the clip starts with a greeting plus the name, otherwise the job is discarded with no side effects. Clips with almost no speech are never uploaded.
+- The endpointer has three phases: the wake phrase itself, a grace period if only the phrase was said, then the command, which ends after about 1.4 s of silence, on “Tawny send it”, on Esc, or at 60 s.
+- Everything audio-related that does not need a browser lives in `src/shared/audio` and is unit-tested with synthetic audio. The hotkey path still records with `MediaRecorder` and is unchanged.
+- The engine window exists only while hands-free is on, so turning it off releases the microphone. Lock and sleep pause it.
+
+## Computer control
+
+```text
+spoken command → controlGrammar (local) ──┐
+                  or planner (CLEF 70B, JSON mode) ┴→ Plan (zod, ≤ 8 steps, closed verb set) → assessPlan → confirm?
+                  → PlanExecutor → TargetResolver (drive/folder/app/window/site) → tier 0: direct OS open
+                                                                                  → tier 1: tawny-control.exe (UI Automation, real cursor, SendInput)
+                                                                                  → tier 2: vision (opt-in screenshot)
+```
+
+Verbs: `open`, `open_path`, `launch_app`, `open_url`, `focus_window`, `ui_click`, `type`, `key`, `scroll`, `window`, `wait`. There is no shell verb. Shells, scripts and executables are blocked by name and extension; typing and keys are refused while a shell or elevated window is in front; destructive labels, closing windows, type-then-Enter and planner-originated URLs need a confirmation; ambiguous matches are refused instead of guessed; moving the mouse or pressing Esc aborts. Window titles passed to the planner are quoted as untrusted data.
 
 ## Authentication and local storage
 
-Google OAuth uses the system browser and a temporary loopback callback. Firebase validates the Google credential. The refresh session is encrypted and stored in `auth-session.bin` under Electron `userData`; provider credentials are encrypted into `credentials.bin`. Shortcut preferences are in `hotkey.json`; diagnostics are in `logs/pipeline.jsonl`; generated JPEGs are stored beside these files.
+Google OAuth uses the system browser and a temporary loopback callback. Firebase validates the Google credential. The refresh session is encrypted and stored in `auth-session.bin` under Electron `userData`; provider credentials are encrypted into `credentials.bin`. Shortcut preferences are in `hotkey.json` and behavior switches (hands-free, cursor style, vision) in `behavior.json`; diagnostics are in `logs/pipeline.jsonl`; generated JPEGs are stored beside these files.
 
-Electron `safeStorage` is required. On Linux Tawny rejects the plaintext fallback and requires a Secret Service or KWallet backend. Signing out removes the persisted Firebase session, but does not remove provider credentials or generated images.
+Electron `safeStorage` is required. Signing out removes the persisted Firebase session, but does not remove provider credentials or generated images.
 
 ## Diagnostics and recovery
 
@@ -98,7 +123,14 @@ Renderer `unresponsive`, `responsive`, and `render-process-gone` events are reco
 ```text
 src/main/app.ts                    Electron lifecycle and orchestration
 src/main/pipeline/machine.ts       XState lifecycle
-src/main/pipeline/gate.ts          Optional wake-phrase extraction
+src/main/pipeline/gate.ts          Wake-phrase extraction, strict hands-free gate, send phrase
+src/main/pipeline/router.ts        Intent routing rules and reconciliation with the decider
+src/main/pipeline/controlGrammar.ts Local grammar for control commands
+src/main/control/                  Plan schema and safety, resolver, executor, planner, vision, helper client
+src/main/wake/                     Wake detector and recognizer service
+src/main/engine/engineHost.ts      Hidden microphone window
+src/main/native/                   tawny-control.cs, tawny-wake.cs (C# 5, compiled by pnpm build:native)
+src/shared/audio/                  VAD, endpointer, ring buffer, capture core, WAV
 src/main/pipeline/intent.ts        Explicit local intent dictionaries
 src/main/pipeline/policy.ts        Pure action policy helpers
 src/main/providers/groqWhisper.ts  Audio upload, timeout, retries, schema validation

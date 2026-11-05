@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer } from 'electron';
-import type { AuthProfile, HotkeyStatus, HotkeyTestResult, OverlaySnapshot, PipelineLog, ProviderSettings, UpdateNotice } from '../shared/contracts';
+import type { AuthProfile, BehaviorSettings, HandsFreeStatus, HotkeyStatus, HotkeyTestResult, OverlaySnapshot, PipelineLog, ProviderSettings, UpdateNotice } from '../shared/contracts';
 
 contextBridge.exposeInMainWorld('voiceRouter', {
   getSnapshot: (): Promise<OverlaySnapshot> => ipcRenderer.invoke('overlay:get-snapshot'),
@@ -58,6 +58,15 @@ contextBridge.exposeInMainWorld('voiceRouter', {
     ipcRenderer.on('updates:state', handler);
     return () => ipcRenderer.removeListener('updates:state', handler);
   },
+  getBehavior: (): Promise<BehaviorSettings> => ipcRenderer.invoke('behavior:get'),
+  saveBehavior: (behavior: BehaviorSettings): Promise<BehaviorSettings> => ipcRenderer.invoke('behavior:save', behavior),
+  getHandsFree: (): Promise<HandsFreeStatus> => ipcRenderer.invoke('handsfree:get'),
+  onHandsFree: (listener: (status: HandsFreeStatus) => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, status: HandsFreeStatus) => listener(status);
+    ipcRenderer.on('handsfree:status', handler);
+    return () => ipcRenderer.removeListener('handsfree:status', handler);
+  },
+  respondConfirm: (approved: boolean): void => ipcRenderer.send('confirm:respond', approved),
   send: (event: 'HOTKEY' | 'STOP' | 'CANCEL' | 'CONFIRM') => ipcRenderer.send('pipeline:event', event),
   subscribe: (listener: (snapshot: OverlaySnapshot) => void) => {
     const handler = (_event: Electron.IpcRendererEvent, snapshot: OverlaySnapshot) => listener(snapshot);

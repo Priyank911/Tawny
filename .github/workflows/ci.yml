@@ -10,12 +10,8 @@ permissions:
 
 jobs:
   verify:
-    name: Verify on ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [windows-latest, ubuntu-latest, macos-latest]
-    runs-on: ${{ matrix.os }}
+    name: Verify on Windows
+    runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -26,6 +22,8 @@ jobs:
           node-version: 22
           cache: pnpm
       - run: pnpm install --frozen-lockfile
+      - name: Build and smoke-test the Windows helpers
+        run: pnpm build:native
       - run: pnpm typecheck
       - run: pnpm test
       - run: pnpm build

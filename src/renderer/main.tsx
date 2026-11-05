@@ -1,7 +1,7 @@
 import { StrictMode, useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactElement } from 'react';
 import { createRoot } from 'react-dom/client';
-import { ChevronRight, Image as ImageIcon, LoaderCircle, Sparkles, ScrollText, Settings2, X, Keyboard, ShieldCheck, Code as CodeIcon, FileText as FileTextIcon, LogOut, UserRound, ExternalLink, Download } from 'lucide-react';
-import type { AuthProfile, HotkeyStatus, OverlaySnapshot, PipelineLog, ProviderSettings, UpdateNotice } from '../shared/contracts';
+import { ChevronRight, Image as ImageIcon, LoaderCircle, Sparkles, ScrollText, Settings2, X, Keyboard, ShieldCheck, Code as CodeIcon, FileText as FileTextIcon, LogOut, UserRound, ExternalLink, Download, MousePointer2, Mic } from 'lucide-react';
+import type { AuthProfile, BehaviorSettings, HandsFreeStatus, HotkeyStatus, OverlaySnapshot, PipelineLog, ProviderSettings, UpdateNotice } from '../shared/contracts';
 import './styles.css';
 
 const RECORDING_SEGMENT_MS = 60_000;
@@ -48,6 +48,8 @@ function App(): ReactElement {
   const [hotkeyTestState, setHotkeyTestState] = useState<'idle' | 'waiting' | 'passed' | 'failed'>('idle');
   const [hotkeyFeedback, setHotkeyFeedback] = useState<{ state: 'success' | 'error' | 'waiting'; message: string } | undefined>(undefined);
   const [installingUpdate, setInstallingUpdate] = useState(false);
+  const [behavior, setBehavior] = useState<BehaviorSettings>({ handsFree: false, controlStyle: 'visual', visionFallback: false });
+  const [handsFree, setHandsFree] = useState<HandsFreeStatus>({ enabled: false, state: 'off', message: 'Hands-free is off.' });
   const recorderRef = useRef<MediaRecorder | undefined>(undefined);
   const streamRef = useRef<MediaStream | undefined>(undefined);
   const chunksRef = useRef<Blob[]>([]);
@@ -112,6 +114,9 @@ function App(): ReactElement {
       setAuthError('Sign in with Google to continue using Tawny.');
     });
     const unsubscribeUpdate = window.voiceRouter.onUpdateState(setUpdateNotice);
+    void window.voiceRouter.getBehavior().then(setBehavior).catch(() => undefined);
+    void window.voiceRouter.getHandsFree().then(setHandsFree).catch(() => undefined);
+    const unsubscribeHandsFree = window.voiceRouter.onHandsFree(setHandsFree);
     const unsubscribeLogs = window.voiceRouter.onLog((entry) => setLogs((current) => [...current.slice(-199), entry]));
     return () => {
       unsubscribeSnapshot();
@@ -121,6 +126,7 @@ function App(): ReactElement {
       unsubscribeAuth();
       unsubscribeAuthRequired();
       unsubscribeUpdate();
+      unsubscribeHandsFree();
       unsubscribeLogs();
     };
   }, []);
@@ -141,7 +147,7 @@ function App(): ReactElement {
     }).catch(() => undefined);
   }, [settingsOpen]);
   useEffect(() => {
-    if (state !== 'arming' || recorderRef.current || capturePendingRef.current) return undefined;
+    if (state !== 'arming' || snapshot.source === 'wake' || recorderRef.current || capturePendingRef.current) return undefined;
     const capture = async (): Promise<void> => {
       finalizedRef.current = false;
       cancelledCaptureRef.current = false;
@@ -203,7 +209,7 @@ function App(): ReactElement {
     return undefined;
   }, [state]);
   useEffect(() => {
-    if (state !== 'finalizing') return undefined;
+    if (state !== 'finalizing' || snapshot.source === 'wake') return undefined;
     stopRequestedRef.current = true;
     if (!recorderRef.current) {
       window.voiceRouter.logCapture({ event: 'capture.stop.pending', message: 'Waiting for microphone permission before finalizing.' });
@@ -215,7 +221,7 @@ function App(): ReactElement {
     return undefined;
   }, [state]);
   useEffect(() => {
-    if (state !== 'cancelled') return undefined;
+    if (state !== 'cancelled' || snapshot.source === 'wake') return undefined;
     cancelledCaptureRef.current = true;
     stopRequestedRef.current = true;
     rotatingRef.current = false;
@@ -239,8 +245,12 @@ function App(): ReactElement {
     const isImage = snapshot.intent === 'image_generate' || !!snapshot.imageDataUrl;
     const isCodeOrQuery = snapshot.intent === 'text_query';
     const isRewrite = snapshot.intent === 'text_rewrite';
+    const isControl = snapshot.intent === 'computer_control';
+    const isWake = snapshot.source === 'wake';
 
-    const handlingTitle = isImage
+    const handlingTitle = isControl
+      ? 'Working on it'
+      : isImage
       ? 'Generating image'
       : isCodeOrQuery
       ? 'Writing code'
@@ -248,7 +258,9 @@ function App(): ReactElement {
       ? 'Rewriting text'
       : 'Generating response';
 
-    const handlingSubtitle = isImage
+    const handlingSubtitle = isControl
+      ? snapshot.message ?? 'Controlling your computer'
+      : isImage
       ? 'Cloudflare Flux'
       : isCodeOrQuery
       ? 'Cloudflare Llama'
@@ -256,7 +268,9 @@ function App(): ReactElement {
       ? 'Cloudflare CLEF'
       : 'Cloudflare AI';
 
-    const doneTitle = isImage
+    const doneTitle = isControl
+      ? 'Done'
+      : isImage
       ? 'Image ready'
       : isCodeOrQuery
       ? 'Code ready'
@@ -267,23 +281,32 @@ function App(): ReactElement {
     const map: Record<string, [string, string]> = {
       idle: ['Ready', displayShortcut(hotkeyStatus.accelerator)],
       arming: ['Listening', 'Speak now'],
-      recording: ['Listening', 'Release to send'],
+      recording: isWake ? ['Listening', 'Say “Tawny send it” to finish'] : ['Listening', 'Release to send'],
       finalizing: ['Finishing', 'Saving audio'],
       transcribing: ['Transcribing', 'Groq Whisper'],
       gating: ['Routing', 'Evaluating wake phrase'],
       deciding: ['Routing', 'Understanding request'],
-      confirming: ['Generate image?', 'Press Enter to confirm'],
+      confirming: snapshot.confirmMessage ? ['Are you sure?', snapshot.confirmMessage] : ['Generate image?', 'Press Enter to confirm'],
       handling: [handlingTitle, handlingSubtitle],
       injecting: ['Pasting', 'Returning to your app'],
-      done: [doneTitle, snapshot.message?.includes('clipboard') ? snapshot.message : isImage ? 'Preview generated locally' : 'Pasted at cursor'],
+      done: [doneTitle, isControl ? snapshot.message ?? 'Finished' : snapshot.message?.includes('clipboard') ? snapshot.message : isImage ? 'Preview generated locally' : 'Pasted at cursor'],
       failed: ['Something went wrong', snapshot.message ?? 'Retry with hotkey'],
       cancelled: ['Cancelled', 'Nothing was sent']
     };
     return map[state] ?? ['Tawny', ''];
-  }, [state, snapshot.intent, snapshot.message, snapshot.imageDataUrl, hotkeyStatus.accelerator]);
+  }, [state, snapshot.intent, snapshot.source, snapshot.message, snapshot.confirmMessage, snapshot.imageDataUrl, hotkeyStatus.accelerator]);
 
   const isListening = state === 'recording' || state === 'arming';
   const isBusy = ['transcribing', 'gating', 'deciding', 'handling', 'injecting', 'finalizing'].includes(state);
+  async function updateBehavior(patch: Partial<BehaviorSettings>): Promise<void> {
+    const next = { ...behavior, ...patch };
+    setBehavior(next);
+    try {
+      setBehavior(await window.voiceRouter.saveBehavior(next));
+    } catch {
+      setBehavior(behavior);
+    }
+  }
   function openSettingsPanel(): void {
     window.voiceRouter?.setSettingsOpen(true);
     setSettingsOpen(true);
@@ -490,6 +513,12 @@ function App(): ReactElement {
         </>
       ) : (
         <div className="tawny-overlay-wrapper">
+          {snapshot.source === 'wake' && isListening ? (
+            <div className="tawny-orb" role="status" aria-label="Tawny is listening" style={{ ['--level' as string]: String(Math.min(1, snapshot.rms)) }}>
+              <span className="orb-ring" />
+              <span className="orb-core"><Mic size={15} strokeWidth={2} /></span>
+            </div>
+          ) : (
           <div className="tawny-floating-pill">
             <div className="notch-handle" />
 
@@ -541,7 +570,9 @@ function App(): ReactElement {
                 <img className="pill-preview-image" src={snapshot.imageDataUrl} alt="Preview" />
               ) : (
                 <div className="pill-preview-placeholder">
-                  {snapshot.intent === 'text_query' ? (
+                  {snapshot.intent === 'computer_control' ? (
+                    <MousePointer2 size={16} strokeWidth={1.75} />
+                  ) : snapshot.intent === 'text_query' ? (
                     <CodeIcon size={16} strokeWidth={1.75} />
                   ) : snapshot.intent === 'text_rewrite' ? (
                     <FileTextIcon size={16} strokeWidth={1.75} />
@@ -550,18 +581,26 @@ function App(): ReactElement {
                   )}
                 </div>
               )}
-              {state === 'confirming' ? (
+              {snapshot.confirmMessage ? (
+                <div className="confirm-group">
+                  <button className="confirm-btn" onClick={() => window.voiceRouter?.respondConfirm(true)}>
+                    Confirm <kbd>Enter</kbd>
+                  </button>
+                  <button className="confirm-cancel" onClick={() => window.voiceRouter?.respondConfirm(false)}>Cancel</button>
+                </div>
+              ) : state === 'confirming' ? (
                 <button className="confirm-btn" onClick={() => window.voiceRouter?.send('CONFIRM')}>
                   Confirm <kbd>Enter</kbd>
                 </button>
               ) : (
                 <div className="pill-ready-tag">
-                  <span>{state === 'recording' ? 'REC' : state === 'finalizing' || state === 'transcribing' ? 'WAIT' : 'READY'}</span>
+                  <span>{state === 'recording' ? 'REC' : state === 'finalizing' || state === 'transcribing' ? 'WAIT' : isBusy ? 'WORKING' : 'READY'}</span>
                   <ChevronRight size={11} strokeWidth={2.5} />
                 </div>
               )}
             </div>
           </div>
+          )}
         </div>
       )}
       {settingsOpen && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.currentTarget === event.target) closeSettingsPanel(); }}>
@@ -582,6 +621,13 @@ function App(): ReactElement {
               {hotkeyFeedback.state === 'waiting' ? <LoaderCircle size={12} className="signin-spinner" /> : hotkeyFeedback.state === 'success' ? <ShieldCheck size={12} /> : <X size={12} />}
               <span>{hotkeyFeedback.message}</span>
             </p>}
+          </section>
+          <section className="hotkey-settings behavior-settings" aria-labelledby="handsfree-title">
+            <div className="hotkey-settings-heading"><div><span id="handsfree-title">Hands-free and voice control</span><small>Say “Hey Tawny”, then your command. Windows only.</small></div><span className={`hotkey-state ${handsFree.state === 'listening' ? 'is-registered' : 'needs-compositor'}`}>{handsFree.state === 'listening' ? 'Listening' : handsFree.state === 'off' ? 'Off' : handsFree.state === 'error' ? 'Problem' : 'Starting'}</span></div>
+            <label className="toggle-row"><input type="checkbox" checked={behavior.handsFree} onChange={(event) => void updateBehavior({ handsFree: event.target.checked })} /><span><strong>Listen for “Hey Tawny”</strong><small>Keeps the microphone open while Tawny runs. Recognition of the wake phrase happens on this PC; audio is uploaded to Groq only after a wake phrase.</small></span></label>
+            <p className={`hotkey-status-copy ${handsFree.state === 'error' ? 'is-error' : ''}`} role="status">{handsFree.message}</p>
+            <label className="toggle-row"><input type="checkbox" checked={behavior.controlStyle === 'visual'} onChange={(event) => void updateBehavior({ controlStyle: event.target.checked ? 'visual' : 'fast' })} /><span><strong>Show the cursor moving</strong><small>When off, Tawny opens things directly without animating the mouse. Moving the mouse stops any action.</small></span></label>
+            <label className="toggle-row"><input type="checkbox" checked={behavior.visionFallback} onChange={(event) => void updateBehavior({ visionFallback: event.target.checked })} /><span><strong>Use screenshots when an app cannot be read</strong><small>Off by default. When on, a screenshot of your screen is sent to Cloudflare to find a button Tawny cannot otherwise see.</small></span></label>
           </section>
           <div className="settings-grid">
             {([

@@ -3,6 +3,7 @@ node_modules/
 
 # Electron/Vite build output
 out/
+build/
 dist/
 dist-electron/
 release/

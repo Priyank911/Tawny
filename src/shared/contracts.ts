@@ -44,6 +44,12 @@ export const targetWindowSchema = z.object({
 });
 export type TargetWindow = z.infer<typeof targetWindowSchema>;
 
+export const intentSchema = z.enum(['image_generate', 'text_rewrite', 'text_query', 'computer_control', 'plain_dictation']);
+export type Intent = z.infer<typeof intentSchema>;
+
+export const captureSourceSchema = z.enum(['hotkey', 'wake']);
+export type CaptureSource = z.infer<typeof captureSourceSchema>;
+
 export const overlaySnapshotSchema = z.object({
   state: overlayStateSchema,
   stage: stageSchema.optional(),
@@ -52,7 +58,9 @@ export const overlaySnapshotSchema = z.object({
   message: z.string().optional(),
   imageDataUrl: z.string().optional(),
   target: targetWindowSchema.optional(),
-  intent: z.enum(['image_generate', 'text_rewrite', 'text_query', 'plain_dictation']).optional()
+  intent: intentSchema.optional(),
+  source: captureSourceSchema.optional(),
+  confirmMessage: z.string().optional()
 });
 export type OverlaySnapshot = z.infer<typeof overlaySnapshotSchema>;
 
@@ -78,6 +86,21 @@ export const providerSettingsSchema = z.object({
   cloudflareApiToken: z.string().default('')
 });
 export type ProviderSettings = z.infer<typeof providerSettingsSchema>;
+
+export const behaviorSettingsSchema = z.object({
+  handsFree: z.boolean().default(false),
+  controlStyle: z.enum(['visual', 'fast']).default('visual'),
+  visionFallback: z.boolean().default(false)
+});
+export type BehaviorSettings = z.infer<typeof behaviorSettingsSchema>;
+
+export type HandsFreeState = 'off' | 'starting' | 'listening' | 'paused' | 'error';
+
+export interface HandsFreeStatus {
+  enabled: boolean;
+  state: HandsFreeState;
+  message: string;
+}
 
 export interface AuthProfile {
   email: string;

@@ -8,10 +8,10 @@ Tawny is an early-preview desktop voice assistant. This guide covers first launc
 
 ## First launch
 
-1. Install Tawny using the instructions for your operating system. Preview builds are unsigned; verify the installer checksum before opening it.
+1. Install Tawny using the Windows instructions. Preview builds are unsigned; verify the installer checksum before opening it.
 2. Launch Tawny and choose **Continue with Google**. Authentication opens in your system browser and returns to Tawny when complete.
 3. Choose **Configure providers** and enter your own Groq API key, Cloudflare account ID, and Cloudflare API token. Save the credentials.
-4. Allow microphone access. On Linux, make sure the desktop keyring is installed, running, and unlocked so Tawny can encrypt credentials and the sign-in session.
+4. Allow microphone access.
 5. Choose **Run in background** to use the global shortcut and tray controls.
 
 The release build already contains Tawny’s Firebase project configuration; users do not need to create an OAuth client. API keys for Groq and Cloudflare are user-provided and are stored encrypted on the device. Create a Groq key in the [Groq console](https://console.groq.com/keys); follow Cloudflare’s [Workers AI REST API setup](https://developers.cloudflare.com/workers-ai/get-started/rest-api/) to create a token and find your account ID.
@@ -29,17 +29,33 @@ The default shortcut is **Ctrl + Alt + Space**. It can be changed in **Settings 
 | Generate an image | Press the shortcut and describe the image you want. Tawny creates the image, saves a local JPEG, and copies the image to the clipboard. |
 | Cancel a job | Press **Esc** while Tawny is working. |
 
-The microphone stays active until you stop it. On Windows, a held shortcut can also stop capture on key release. On macOS and Linux, press the shortcut again to stop. Tawny breaks long recordings into one-minute audio segments for transcription.
+The microphone stays active until you stop it. A held shortcut also stops capture on key release; or press the shortcut again to stop. Tawny breaks long recordings into one-minute audio segments for transcription.
 
 ### Verify a shortcut
 
 Open **Settings → Recording shortcut**, save the desired combination, then press **Test key** and press the displayed combination. A success message confirms Tawny received it; a timeout means the operating system or compositor did not deliver the trigger.
 
-On X11, Windows, and macOS, Tawny asks Electron to register the shortcut. Linux Wayland uses the desktop’s Global Shortcuts portal when available. If Settings says **Compositor setup**, copy the provided `--trigger` command and bind it to the shortcut in your compositor’s settings. On Hyprland or another non-GNOME/KDE compositor, make sure the matching `xdg-desktop-portal` backend is installed and running. Wayland controls window stacking and position; compositor window rules may be needed to keep the overlay above other windows.
+Tawny asks Electron to register the shortcut and reports whether Windows accepted it. If another app owns the combination, choose a different one.
+
+## Hands-free mode and voice control
+
+Turn on **Settings → Hands-free and voice control → Listen for “Hey Tawny”**. While it is on, the microphone stays open on this PC; a small status line in Settings shows whether the listener is running.
+
+1. Say **“Hey Tawny”**. A small orb appears.
+2. Say your request, in the same breath or after a short pause. Everything the shortcut does works here: dictation, rewriting a selection, answers, code, images, and computer control.
+3. Stop talking, or say **“Tawny send it”**, to finish. Press **Esc** to cancel.
+
+Examples: “Hey Tawny, open the Projects folder on D drive.” “Hey Tawny, switch to Chrome.” “Hey Tawny, click the Save button.” “Hey Tawny, scroll down.” “Hey Tawny, write a Python function that reverses a string.”
+
+**Privacy.** The wake phrase is recognised by Windows on this PC. Nothing is uploaded until it is heard; the request is then sent to Groq, which has to confirm it began with “Hey Tawny”, otherwise it is discarded. Turning the switch off releases the microphone. Hands-free pauses while the screen is locked.
+
+**Voice control safety.** Tawny moves the real cursor (turn this off in Settings for instant, direct opening), stops when you move the mouse or press Esc, and asks for confirmation before closing windows, clicking buttons such as Delete, Send or Pay, or opening links it worked out itself. Confirm with **Enter** or the shortcut, refuse with **Esc**. It never starts a command shell or types into a terminal or an administrator window, and it refuses when several items match a name.
+
+**Screenshots.** Off by default. If you enable **Use screenshots when an app cannot be read**, Tawny sends a screenshot to Cloudflare only when it cannot find a control through Windows accessibility.
 
 ## Pasting behavior
 
-Tawny writes the result to the system clipboard and then asks the operating system to paste it into the previously focused application. If Wayland blocks synthetic keyboard input, Tawny leaves the result on the clipboard and shows a notification so you can paste manually. Applications running as administrator/root, secure fields, remote desktops, and apps that reject simulated input can also prevent automatic pasting. The generated image remains on the clipboard even if the destination app does not accept it.
+Tawny writes the result to the system clipboard and then asks the operating system to paste it into the previously focused application. Applications running as administrator, secure fields, remote desktops, and apps that reject simulated input can also prevent automatic pasting. The generated image remains on the clipboard even if the destination app does not accept it.
 
 ## Privacy and local data
 
@@ -57,29 +73,27 @@ Tawny requires cloud services for transcription and model-backed tasks:
 Quit Tawny completely, including its tray process. Find the application’s `userData` directory for the current OS account (the directory name is normally **Tawny** for an installed build and can be **voicerouter** in a development build):
 
 - Windows: under `%APPDATA%`
-- macOS: under `~/Library/Application Support/`
-- Linux: under `${XDG_CONFIG_HOME:-~/.config}/`
 
-Delete the Tawny/voicerouter application-data folder to clear its local images, logs, shortcut preference, encrypted provider credentials, and saved sign-in session. You will need to sign in and enter provider credentials again. To remove only generated images, delete the `tawny-image-*.jpg` files and keep the rest of the folder. Clearing Tawny’s files does not clear the operating-system clipboard.
+Delete the Tawny/voicerouter application-data folder to clear its local images, logs, shortcut preference, encrypted provider credentials, and saved sign-in session. You will need to sign in and enter provider credentials again. It also holds your hands-free and voice-control choices (`behavior.json`). To remove only generated images, delete the `tawny-image-*.jpg` files and keep the rest of the folder. Clearing Tawny’s files does not clear the operating-system clipboard.
 
 ## Troubleshooting
+
+### Hands-free does not react
+
+1. Open Settings and read the status line under **Hands-free and voice control**.
+2. “No speech recognizer”: add an English speech language in Windows **Settings → Time and language → Speech**.
+3. “No microphone”: allow desktop apps to use the microphone in Windows privacy settings and check the default input device.
+4. Say the phrase clearly, then your request. If it keeps missing, use the shortcut; both paths do the same things. Check **Live log** for `wake.start`, `gate.result` and `job.discarded`.
+
+### Voice control did nothing or stopped
+
+Check **Live log** for `control.*` events. Tawny stops when you move the mouse, when a name matches several items, when the front window is an administrator or terminal window, or when `tawny-control.exe` is missing (reinstall Tawny).
 
 ### The shortcut does nothing
 
 1. Open Settings and check that the status is **Registered**. Use **Test key**.
 2. Try another key combination if another app or the OS already owns it.
-3. On Wayland, follow the **Compositor setup** command shown in Settings and verify the compositor’s binding. X11 uses `xdotool`; Wayland uses the portal/your compositor.
-4. Check **Live log** for `hotkey.register.failure`, `hotkey.test.failed`, or `hotkey.ignored.settings`.
-
-### Tawny cannot sign in on Linux
-
-Install and unlock a Secret Service keyring (GNOME Keyring on many GNOME/Hyprland setups) or unlock KWallet on KDE Plasma. For Debian/Ubuntu:
-
-```sh
-sudo apt install gnome-keyring libsecret-1-0
-```
-
-Then sign out of the desktop session and sign back in so the keyring service starts.
+3. Check **Live log** for `hotkey.register.failure`, `hotkey.test.failed`, or `hotkey.ignored.settings`.
 
 ### Sign-in succeeds in the browser but not in Tawny
 
@@ -87,7 +101,7 @@ Close the authorization tab only after it says sign-in is complete, then return 
 
 ### The window or paste target is wrong
 
-On Wayland, the compositor controls focus, stacking, and placement. Add a compositor window rule if needed. On other systems, verify the intended destination app was focused before starting Tawny. Automatic paste may be blocked by elevation or application security settings; use the clipboard fallback instead.
+Verify the intended destination app was focused before starting Tawny. Automatic paste may be blocked by elevation or application security settings; the result stays on the clipboard so you can paste it yourself.
 
 ### Find and share useful logs
 
@@ -95,8 +109,8 @@ Open **Live log** in Tawny or read `logs/pipeline.jsonl` inside the application�
 
 ## Updating Tawny
 
-Tawny checks the GitHub early-preview releases. Windows and Linux AppImage can download an update in the background; Tawny installs it when it closes. Unsigned macOS builds and Linux `.deb` installs require a manual download from [Releases](https://github.com/Priyank911/Tawny/releases). For `.deb`, update through your package manager. Read the [install notes](./INSTALL-EARLY-PREVIEW.md) for the current platform-specific behavior.
+Tawny checks the GitHub early-preview releases. Tawny downloads an update in the background and installs it when it closes. Read the [install notes](./INSTALL-EARLY-PREVIEW.md) for details.
 
 ## Feedback
 
-Tawny is preview software; behavior can vary with operating-system version, permissions, input method, and compositor. When reporting a bug, include OS/version, display server (X11/Wayland), Tawny version, exact steps, and sanitized log event names. Do not attach voice recordings or secret values.
+Tawny is preview software; behavior can vary with Windows version, permissions and input method. When reporting a bug, include the Windows version, Tawny version, exact steps, and sanitized log event names. Do not attach voice recordings or secret values.

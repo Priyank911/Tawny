@@ -12,6 +12,11 @@ extraResources:
     to: native/keywatcher.exe
     filter:
       - keywatcher.exe
+  - from: build/native
+    to: native
+    filter:
+      - tawny-control.exe
+      - tawny-wake.exe
 publish:
   - provider: github
     owner: Priyank911
@@ -31,38 +36,3 @@ nsis:
   allowToChangeInstallationDirectory: true
   createDesktopShortcut: true
   createStartMenuShortcut: true
-mac:
-  icon: tawny-mark.svg
-  target:
-    - target: dmg
-      arch:
-        - x64
-        - arm64
-    - target: zip
-      arch:
-        - x64
-        - arm64
-  identity: null
-  category: public.app-category.productivity
-  extendInfo:
-    NSMicrophoneUsageDescription: Tawny needs microphone access to transcribe your voice commands.
-    NSAppleEventsUsageDescription: Tawny uses System Events to paste dictated and generated text into the app you are using.
-  artifactName: Tawny-${version}-mac-${arch}.${ext}
-linux:
-  maintainer: "Tawny <developer.priyank0911@gmail.com>"
-  icon: tawny-mark.svg
-  syncDesktopName: true
-  target:
-    - target: AppImage
-      arch:
-        - x64
-    - target: deb
-      arch:
-        - x64
-  category: Utility
-  synopsis: A keyboard-first desktop voice assistant
-  description: Speak naturally and route dictation, rewriting, and image generation from your desktop.
-  artifactName: Tawny-${version}-linux-${arch}.${ext}
-deb:
-  recommends:
-    - gnome-keyring

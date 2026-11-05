@@ -2,7 +2,7 @@
   "name": "voicerouter",
   "version": "0.1.7",
   "private": true,
-  "description": "A resilient desktop voice assistant for Windows, macOS, and Linux.",
+  "description": "A hands-free voice layer for Windows: dictation, rewriting, image generation and voice-driven computer control.",
   "author": "Tawny",
   "desktopName": "com.tawny.desktop.desktop",
   "repository": {
@@ -13,9 +13,10 @@
   "scripts": {
     "dev": "electron-vite dev",
     "build": "electron-vite build",
+    "build:native": "node scripts/build-native.mjs",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "package": "pnpm build && electron-builder --publish never",
+    "package": "pnpm build:native && pnpm build && electron-builder --win --publish never",
     "preview": "electron-vite preview"
   },
   "dependencies": {
