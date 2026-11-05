@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { writeFile } from 'node:fs/promises';
 import { createActor } from 'xstate';
 import { pipelineMachine } from './pipeline/machine';
-import { gateTranscriptDetailed, splitWakePhrase, stripSendPhrase } from './pipeline/gate';
+import { confirmWakePhrase, gateTranscriptDetailed, stripSendPhrase } from './pipeline/gate';
 import { heuristicRoute, needsSelectionCapture, reconcileIntent } from './pipeline/router';
 import { captureSelectedText, pasteImage, pasteText } from './inject';
 import { PipelineError, type AuthProfile, type BehaviorSettings, type CaptureSource, type HandsFreeStatus, type HotkeyStatus, type HotkeyTestResult, type OverlaySnapshot, type UpdateNotice } from '../shared/contracts';
@@ -122,7 +122,7 @@ function handleShortcutTrigger(): void {
   if (!authProfile) {
     mainWindow.show();
     mainWindow.focus();
-    mainWindow.webContents.send('auth:required');
+    sendToRenderer('auth:required');
     return;
   }
 
@@ -307,7 +307,7 @@ function positionOverlayAtTopCenter(): void {
 function showOverlay(): void {
   if (!mainWindow) return;
   backgroundMode = true;
-  mainWindow.webContents.send('app:background-mode');
+  sendToRenderer('app:background-mode');
   mainWindow.setSkipTaskbar(true);
   mainWindow.setResizable(false);
   mainWindow.setSize(OVERLAY_WIDTH, OVERLAY_HEIGHT);
@@ -369,7 +369,7 @@ function openSettings(): void {
   mainWindow.setAlwaysOnTop(false);
   mainWindow.center();
   mainWindow.show();
-  mainWindow.webContents.send('settings:open');
+  sendToRenderer('settings:open');
 }
 
 function closeSettingsWindow(): void {
@@ -407,7 +407,7 @@ function openLogs(): void {
   mainWindow.setAlwaysOnTop(false);
   mainWindow.center();
   mainWindow.show();
-  mainWindow.webContents.send('logs:open');
+  sendToRenderer('logs:open');
 }
 
 function stopRecording(): void {
@@ -489,7 +489,17 @@ function createTray(): void {
 }
 
 const actor = createActor(pipelineMachine);
-setLogSink((entry) => mainWindow?.webContents.send('pipeline:log', entry));
+/**
+ * Every message to the window goes through here. While Tawny quits, the window
+ * is destroyed before the wake helper and the engine finish stopping, and
+ * their final status updates must not throw "Object has been destroyed".
+ */
+function sendToRenderer(channel: string, ...args: unknown[]): void {
+  if (!mainWindow || mainWindow.isDestroyed() || mainWindow.webContents.isDestroyed()) return;
+  mainWindow.webContents.send(channel, ...args);
+}
+
+setLogSink((entry) => sendToRenderer('pipeline:log', entry));
 actor.subscribe((state) => {
   const nextState = state.value as OverlaySnapshot['state'];
   if (nextState === 'transcribing' && finalizingTimer) {
@@ -521,7 +531,7 @@ actor.subscribe((state) => {
     engine.endSession('cancelled');
   }
   applyClickThrough();
-  mainWindow?.webContents.send('overlay:update', snapshot);
+  sendToRenderer('overlay:update', snapshot);
   if (state.value === 'idle' && backgroundMode && mainWindow?.isVisible()) {
     const windowRef = mainWindow;
     setTimeout(() => {
@@ -575,7 +585,7 @@ ipcMain.handle('auth:sign-in', async () => {
     authProfile = await startGoogleSignIn();
     syncHandsFree();
     logPipeline({ event: 'auth.sign-in.success', message: 'Google sign-in completed with Firebase.' });
-    mainWindow?.webContents.send('auth:profile', authProfile);
+    sendToRenderer('auth:profile', authProfile);
     return authProfile;
   } catch (error) {
     logPipeline({ level: 'warn', event: 'auth.sign-in.failure', message: 'Google sign-in did not complete.' });
@@ -588,7 +598,7 @@ ipcMain.handle('auth:sign-out', async () => {
   authProfile = undefined;
   syncHandsFree();
   logPipeline({ event: 'auth.sign-out', message: 'The local Firebase session was removed from this device.' });
-  mainWindow?.webContents.send('auth:profile', undefined);
+  sendToRenderer('auth:profile', undefined);
 });
 ipcMain.handle('updates:open-release', async () => openLatestReleasePage());
 ipcMain.handle('updates:install', () => installUpdateFromNotice());
@@ -691,7 +701,7 @@ function askConfirmation(message: string): Promise<boolean> {
     pendingConfirm = { resolve, timer };
     snapshot = { ...snapshot, confirmMessage: message };
     applyClickThrough();
-    mainWindow?.webContents.send('overlay:update', snapshot);
+    sendToRenderer('overlay:update', snapshot);
     setConfirmKey(true);
     logPipeline({ event: 'control.confirm', message: `Waiting for confirmation: ${message}`, jobId: activeJobId, stage: 'decide' });
   });
@@ -704,7 +714,7 @@ function resolveConfirmation(approved: boolean): void {
   clearTimeout(pending.timer);
   setConfirmKey(false);
   snapshot = { ...snapshot, confirmMessage: undefined };
-  mainWindow?.webContents.send('overlay:update', snapshot);
+  sendToRenderer('overlay:update', snapshot);
   pending.resolve(approved);
   if (snapshot.state === 'confirming') actor.send({ type: approved ? 'CONFIRM' : 'CANCEL' });
 }
@@ -738,7 +748,7 @@ async function runComputerControl(input: { plan?: Plan; spoken: string; accountI
     if (!plan) {
       origin = 'planner';
       snapshot = { ...snapshot, message: 'Working out the steps…' };
-      mainWindow?.webContents.send('overlay:update', snapshot);
+      sendToRenderer('overlay:update', snapshot);
       const context = await control.plannerContext().catch(() => ({ windows: [], drives: [] }));
       const planned = await planWithCloudflare(input.accountId, input.apiToken, input.spoken, context, abort.signal);
       if (!planned.ok) throw new PipelineError('input', 'decide', planned.reason);
@@ -764,7 +774,7 @@ async function runComputerControl(input: { plan?: Plan; spoken: string; accountI
       confirm: askConfirmation,
       progress: (message) => {
         snapshot = { ...snapshot, message };
-        mainWindow?.webContents.send('overlay:update', snapshot);
+        sendToRenderer('overlay:update', snapshot);
       },
       note: (event, message) => logPipeline({ event: `control.${event}`, message, jobId: activeJobId, stage: 'handle' })
     });
@@ -781,6 +791,13 @@ async function runComputerControl(input: { plan?: Plan; spoken: string; accountI
 // Shared audio pipeline. The hotkey path (browser recording, webm) and the
 // hands-free path (engine clip, wav) both end here.
 // ---------------------------------------------------------------------------
+
+/**
+ * Whisper otherwise spells the name as "Tony", "Tani" or drops it. The hint is
+ * only the wake phrase on purpose: Whisper can echo its prompt on near-silent
+ * audio, and an echoed "Hey Tawny." has no command, so it is discarded.
+ */
+const WAKE_TRANSCRIPTION_HINT = 'Hey Tawny.';
 
 interface ProcessOptions {
   source: CaptureSource;
@@ -809,7 +826,7 @@ async function processAudio(segments: Uint8Array[], options: ProcessOptions): Pr
     data: { bytes: String(totalBytes), segments: String(segments.length), source: options.source }
   });
   try {
-    const transcript = await transcribeWithGroq(settings.groqApiKey, segments, options.mimeType);
+    const transcript = await transcribeWithGroq(settings.groqApiKey, segments, options.mimeType, wakeSource ? WAKE_TRANSCRIPTION_HINT : undefined);
     if (!transcript) {
       if (wakeSource) {
         discardJob('The hands-free clip had no recognizable speech.');
@@ -827,14 +844,14 @@ async function processAudio(segments: Uint8Array[], options: ProcessOptions): Pr
       data: { characters: String(transcript.length), segments: String(segments.length) }
     });
     snapshot = { ...snapshot, message: `Heard: ${transcript}` };
-    mainWindow?.webContents.send('overlay:update', snapshot);
+    sendToRenderer('overlay:update', snapshot);
 
     actor.send({ type: 'STAGE', stage: 'gating' });
     // Hands-free clips must open with a real wake phrase: the local recognizer only suggests a wake, this check confirms it.
     const spoken = wakeSource ? stripSendPhrase(transcript).text : transcript;
     const gate = wakeSource
       ? (() => {
-        const split = splitWakePhrase(spoken);
+        const split = confirmWakePhrase(spoken);
         return { routed: split.routed, text: split.command, original: split.original };
       })()
       : gateTranscriptDetailed(transcript);
@@ -846,7 +863,16 @@ async function processAudio(segments: Uint8Array[], options: ProcessOptions): Pr
       data: { routed: String(gate.routed), commandLength: String(gate.text.length), source: options.source }
     });
     if (wakeSource && (!gate.routed || !gate.text)) {
-      discardJob(gate.routed ? 'Hey Tawny was said with no command after it.' : 'The speech did not start with a wake phrase; nothing was done.');
+      // The orb was already showing, so say what happened instead of vanishing. The local log keeps the
+      // opening words so wake accuracy can be tuned; nothing beyond what the overlay showed is recorded.
+      const heardStart = transcript.split(/\s+/).slice(0, 6).join(' ');
+      logPipeline({ event: 'gate.rejected', message: 'Whisper did not confirm the wake phrase.', jobId: activeJobId, stage: 'gate', data: { heardStart, routed: String(gate.routed) } });
+      const message = gate.routed
+        ? 'I heard “Hey Tawny” but no request. Say it again with what you need.'
+        : `I heard “${heardStart}${transcript.split(/\s+/).length > 6 ? '…' : ''}”, not “Hey Tawny”, so I did nothing.`;
+      logPipeline({ event: 'job.discarded', message, jobId: activeJobId, stage: 'gate' });
+      snapshot = { ...snapshot, message };
+      actor.send({ type: 'FAIL', message });
       return '';
     }
 
@@ -911,7 +937,7 @@ async function processAudio(segments: Uint8Array[], options: ProcessOptions): Pr
     });
 
     snapshot = { ...snapshot, intent };
-    mainWindow?.webContents.send('overlay:update', snapshot);
+    sendToRenderer('overlay:update', snapshot);
 
     // Path A: Image generation
     if (intent === 'image_generate') {
@@ -926,7 +952,7 @@ async function processAudio(segments: Uint8Array[], options: ProcessOptions): Pr
       const completionMessage = pasteResult === 'clipboard' ? notifyClipboardOnly('image') : 'Image ready.';
       logPipeline({ event: 'image.inject.success', message: pasteResult === 'clipboard' ? 'Generated image is on the clipboard; Wayland did not permit automatic paste.' : 'Generated image copied to the clipboard and pasted into the previously focused application.', jobId: activeJobId, stage: 'inject' });
       snapshot = { ...snapshot, imageDataUrl: `data:${image.mimeType};base64,${image.base64.trim()}`, message: completionMessage };
-      mainWindow?.webContents.send('overlay:update', snapshot);
+      sendToRenderer('overlay:update', snapshot);
       actor.send({ type: 'SUCCESS', message: completionMessage });
       return transcript;
     }
@@ -953,7 +979,7 @@ async function processAudio(segments: Uint8Array[], options: ProcessOptions): Pr
       const completionMessage = pasteResult === 'clipboard' ? notifyClipboardOnly('text') : 'Rewrite complete.';
       logPipeline({ event: 'inject.success', message: pasteResult === 'clipboard' ? 'Rewritten text is on the clipboard; Wayland did not permit automatic paste.' : 'Rewritten text pasted into the previously focused application.', jobId: activeJobId, stage: 'inject' });
       snapshot = { ...snapshot, message: completionMessage };
-      mainWindow?.webContents.send('overlay:update', snapshot);
+      sendToRenderer('overlay:update', snapshot);
       actor.send({ type: 'SUCCESS', message: completionMessage });
       return rewrite.text;
     }
@@ -980,7 +1006,7 @@ async function processAudio(segments: Uint8Array[], options: ProcessOptions): Pr
       const completionMessage = pasteResult === 'clipboard' ? notifyClipboardOnly('text') : 'Response ready.';
       logPipeline({ event: 'inject.success', message: pasteResult === 'clipboard' ? 'Assistant response is on the clipboard; Wayland did not permit automatic paste.' : 'Assistant response pasted into the previously focused application.', jobId: activeJobId, stage: 'inject' });
       snapshot = { ...snapshot, message: completionMessage };
-      mainWindow?.webContents.send('overlay:update', snapshot);
+      sendToRenderer('overlay:update', snapshot);
       actor.send({ type: 'SUCCESS', message: completionMessage });
       return responseText;
     }
@@ -1004,7 +1030,7 @@ async function processAudio(segments: Uint8Array[], options: ProcessOptions): Pr
     const completionMessage = pasteResult === 'clipboard' ? notifyClipboardOnly('text') : 'Dictation complete.';
     logPipeline({ event: 'inject.success', message: pasteResult === 'clipboard' ? 'Dictation is on the clipboard; Wayland did not permit automatic paste.' : 'Dictation pasted into the previously focused application.', jobId: activeJobId, stage: 'inject' });
     snapshot = { ...snapshot, message: completionMessage };
-    mainWindow?.webContents.send('overlay:update', snapshot);
+    sendToRenderer('overlay:update', snapshot);
     actor.send({ type: 'SUCCESS', message: completionMessage });
     return dictation;
   } catch (error) {
@@ -1042,8 +1068,8 @@ function publishHandsFree(status: HandsFreeStatus): void {
     logPipeline({ level: status.state === 'error' ? 'warn' : 'info', event: 'handsfree.status', message: status.message, data: { state: status.state } });
   }
   handsFreeStatus = status;
-  mainWindow?.webContents.send('handsfree:status', status);
-  tray?.setToolTip(status.state === 'listening' ? 'Tawny (hands-free listening)' : 'Tawny');
+  sendToRenderer('handsfree:status', status);
+  if (tray && !tray.isDestroyed()) tray.setToolTip(status.state === 'listening' ? 'Tawny (hands-free listening)' : 'Tawny');
 }
 
 function startWakeSession(): void {
@@ -1179,7 +1205,7 @@ engine.on('rms', (value: number) => {
   if (now - lastRmsSent < 50) return;
   lastRmsSent = now;
   snapshot = { ...snapshot, rms: value };
-  mainWindow?.webContents.send('overlay:update', snapshot);
+  sendToRenderer('overlay:update', snapshot);
 });
 
 ipcMain.handle('behavior:get', () => behavior);
@@ -1193,7 +1219,7 @@ ipcMain.handle('behavior:save', async (_event, value: unknown) => {
 ipcMain.handle('handsfree:get', () => handsFreeStatus);
 
 onUpdateAvailable((notice: UpdateNotice) => {
-  mainWindow?.webContents.send('updates:state', notice);
+  sendToRenderer('updates:state', notice);
   if (notice.state === 'downloading' || notice.state === 'error') return;
   const notificationKey = `${notice.state}:${notice.version ?? 'latest'}`;
   if (updateNotificationsShown.has(notificationKey)) return;
@@ -1211,8 +1237,8 @@ setAuthSessionInvalidatedHandler(() => {
   authProfile = undefined;
   syncHandsFree();
   logPipeline({ level: 'warn', event: 'auth.session.expired', message: 'The saved Firebase session is no longer valid; Google sign-in is required.' });
-  mainWindow?.webContents.send('auth:profile', undefined);
-  mainWindow?.webContents.send('auth:required');
+  sendToRenderer('auth:profile', undefined);
+  sendToRenderer('auth:required');
 });
 
 app.whenReady().then(async () => {

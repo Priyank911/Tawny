@@ -67,7 +67,9 @@ export function audioFileName(mimeType: string, index: number): string {
 export async function transcribeWithGroq(
   apiKey: string,
   audio: Uint8Array | readonly Uint8Array[],
-  mimeType = 'audio/webm'
+  mimeType = 'audio/webm',
+  /** Spelling and style hint for the first segment (Whisper's prompt). */
+  hint?: string
 ): Promise<string> {
   if (!apiKey.trim()) throw new Error('Groq API key is not configured.');
   const segments = Array.isArray(audio) ? audio : [audio];
@@ -92,6 +94,7 @@ export async function transcribeWithGroq(
       form.append('response_format', 'json');
       form.append('temperature', '0');
       if (transcripts.length > 0) form.append('prompt', transcripts.join(' ').slice(-900));
+      else if (hint) form.append('prompt', hint);
 
       try {
         response = await fetch('https://api.groq.com/openai/v1/audio/transcriptions', {

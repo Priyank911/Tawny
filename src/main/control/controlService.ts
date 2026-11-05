@@ -7,7 +7,7 @@ import type { BehaviorSettings } from '../../shared/contracts';
 import { resolveNativeBinary } from '../native/binaries';
 import type { ChildLike } from '../native/lineProcess';
 import { runCloudflareModel } from '../providers/cloudflareClef';
-import { AppIndex, type LaunchTarget } from './appIndex';
+import { AppIndex, type LaunchTarget, type StartApp } from './appIndex';
 import type { Plan } from './actions';
 import { PlanExecutor, type ExecResult, type ShellApi } from './executor';
 import { ControlHelper } from './helperClient';
@@ -129,13 +129,37 @@ export class ControlService {
     return found;
   }
 
+  /** Start menu apps from Windows itself, which is the only place Microsoft Store apps are listed. */
+  private startApps(): Promise<StartApp[]> {
+    return new Promise((resolve) => {
+      const child = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', 'Get-StartApps | Select-Object Name,AppID | ConvertTo-Json -Compress'], { windowsHide: true });
+      let output = '';
+      const timer = setTimeout(() => child.kill(), 15_000);
+      child.stdout.setEncoding('utf8');
+      child.stdout.on('data', (chunk: string) => { output += chunk; });
+      child.on('error', () => { clearTimeout(timer); resolve([]); });
+      child.on('close', () => {
+        clearTimeout(timer);
+        try {
+          const parsed: unknown = JSON.parse(output);
+          const rows = Array.isArray(parsed) ? parsed : [parsed];
+          resolve(rows.flatMap((row) => row && typeof row === 'object' && typeof (row as { Name?: unknown }).Name === 'string' && typeof (row as { AppID?: unknown }).AppID === 'string'
+            ? [{ name: (row as { Name: string }).Name, appId: (row as { AppID: string }).AppID }]
+            : []));
+        } catch {
+          resolve([]);
+        }
+      });
+    });
+  }
+
   refreshIndexes(force = false): Promise<void> {
     if (this.refreshing) return this.refreshing;
     const stale = this.paths.ageMs > INDEX_MAX_AGE_MS || Date.now() - this.appsLoadedAt > INDEX_MAX_AGE_MS;
     if (!force && !stale) return Promise.resolve();
     this.refreshing = (async () => {
-      const [roots, shortcuts] = await Promise.all([this.indexRoots(), this.shortcutFiles()]);
-      this.apps.setShortcuts(shortcuts);
+      const [roots, shortcuts, startApps] = await Promise.all([this.indexRoots(), this.shortcutFiles(), this.startApps()]);
+      this.apps.setShortcuts(shortcuts, startApps);
       this.appsLoadedAt = Date.now();
       await this.paths.refresh(roots);
     })().catch(() => undefined).finally(() => { this.refreshing = undefined; });
@@ -153,6 +177,8 @@ export class ControlService {
           if (failure) throw new Error(failure);
         } else if (target.type === 'uri') {
           await shell.openExternal(target.value);
+        } else if (target.type === 'appid') {
+          spawn('explorer.exe', [`shell:AppsFolder\\${target.value}`], { detached: true, stdio: 'ignore' }).unref();
         } else {
           spawn(target.value, [], { detached: true, stdio: 'ignore' }).unref();
         }
