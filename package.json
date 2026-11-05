@@ -1,6 +1,6 @@
 {
   "name": "voicerouter",
-  "version": "0.1.8",
+  "version": "0.1.9",
   "private": true,
   "description": "A hands-free voice layer for Windows: dictation, rewriting, image generation and voice-driven computer control.",
   "author": "Tawny",
@@ -14,9 +14,10 @@
     "dev": "electron-vite dev",
     "build": "electron-vite build",
     "build:native": "node scripts/build-native.mjs",
+    "test:wake": "node scripts/test-wake.mjs",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "package": "pnpm build:native && pnpm build && electron-builder --win --publish never",
+    "package": "pnpm build:native && pnpm test:wake && pnpm build && electron-builder --win --publish never",
     "preview": "electron-vite preview"
   },
   "dependencies": {

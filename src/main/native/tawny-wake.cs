@@ -76,6 +76,24 @@ namespace Tawny
             return best;
         }
 
+        // "hey|hi|okay tawny", optionally followed by the command in the same breath.
+        private static Grammar BuildWakeGrammar()
+        {
+            Choices greeting = new Choices("hey", "hi", "okay");
+            GrammarBuilder phrase = new GrammarBuilder(greeting);
+            phrase.Append("Tawny");
+            GrammarBuilder withCommand = new GrammarBuilder(greeting);
+            withCommand.Append("Tawny");
+            withCommand.AppendDictation();
+            Choices forms = new Choices();
+            forms.Add(new GrammarBuilder[] { withCommand, phrase });
+            Grammar grammar = new Grammar(new GrammarBuilder(forms));
+            grammar.Name = "wake";
+            grammar.Priority = 10;
+            grammar.Weight = 1.0f;
+            return grammar;
+        }
+
         private static void WatchStdin()
         {
             try
@@ -94,6 +112,8 @@ namespace Tawny
 
         private static int Main(string[] args)
         {
+            // Test mode: "tawny-wake.exe --wav file.wav" recognizes a recording instead of the microphone.
+            string wavPath = args.Length == 2 && args[0] == "--wav" ? args[1] : null;
             RecognizerInfo info;
             try
             {
@@ -114,7 +134,14 @@ namespace Tawny
             try
             {
                 engine = new SpeechRecognitionEngine(info);
-                engine.LoadGrammar(new DictationGrammar());
+                // Free dictation alone never hears "Tawny": it is not a dictionary word, so it comes
+                // back as "a tiny" or "T tiny". A dedicated wake grammar makes the phrase something
+                // the recognizer actively listens for. Dictation stays loaded for "send it" and for
+                // everything that is not addressed to Tawny.
+                engine.LoadGrammar(BuildWakeGrammar());
+                DictationGrammar dictation = new DictationGrammar();
+                dictation.Name = "dictation";
+                engine.LoadGrammar(dictation);
                 engine.SpeechHypothesized += delegate(object sender, SpeechHypothesizedEventArgs e)
                 {
                     string text = e.Result.Text;
@@ -135,11 +162,9 @@ namespace Tawny
                 };
                 engine.RecognizeCompleted += delegate(object sender, RecognizeCompletedEventArgs e)
                 {
-                    if (e.Error != null)
-                    {
-                        EmitError("start_failed", e.Error.Message);
-                        Quit.Set();
-                    }
+                    if (e.Error != null) EmitError("start_failed", e.Error.Message);
+                    // Live input only completes on error; a test file completes when it ends.
+                    if (e.Error != null || wavPath != null) Quit.Set();
                 };
             }
             catch (Exception ex)
@@ -150,7 +175,8 @@ namespace Tawny
 
             try
             {
-                engine.SetInputToDefaultAudioDevice();
+                if (wavPath != null) engine.SetInputToWaveFile(wavPath);
+                else engine.SetInputToDefaultAudioDevice();
             }
             catch (Exception ex)
             {
@@ -158,9 +184,12 @@ namespace Tawny
                 return 4;
             }
 
-            Thread watcher = new Thread(WatchStdin);
-            watcher.IsBackground = true;
-            watcher.Start();
+            if (wavPath == null)
+            {
+                Thread watcher = new Thread(WatchStdin);
+                watcher.IsBackground = true;
+                watcher.Start();
+            }
 
             try
             {
