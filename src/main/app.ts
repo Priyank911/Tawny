@@ -1038,6 +1038,9 @@ ipcMain.on('pipeline:event', (_event, event: 'HOTKEY' | 'STOP' | 'CANCEL' | 'CON
 // ---------------------------------------------------------------------------
 
 function publishHandsFree(status: HandsFreeStatus): void {
+  if (status.state !== handsFreeStatus.state || status.message !== handsFreeStatus.message) {
+    logPipeline({ level: status.state === 'error' ? 'warn' : 'info', event: 'handsfree.status', message: status.message, data: { state: status.state } });
+  }
   handsFreeStatus = status;
   mainWindow?.webContents.send('handsfree:status', status);
   tray?.setToolTip(status.state === 'listening' ? 'Tawny (hands-free listening)' : 'Tawny');

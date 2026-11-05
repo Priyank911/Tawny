@@ -74,7 +74,7 @@ export function gateTranscript(transcript: string, alwaysRoute = false): { route
 
 const GREETINGS = new Set(['hey', 'hay', 'hi', 'hai', 'ok', 'okay', 'yo']);
 const NAME_VARIANTS = new Set([
-  'tawny', 'tawney', 'tawni', 'tawnie', 'tauni', 'tauny', 'taunie', 'tauney', 'tanny', 'tonny', 'tony', 'toni', 'tonie', 'tonee'
+  'tawny', 'tawney', 'tawni', 'tawnie', 'tawnee', 'tauni', 'tauny', 'taunie', 'tauney', 'tanny', 'tani', 'taani', 'tanni', 'tonny', 'tony', 'toni', 'tonie', 'tonee', 'torni', 'tarni'
 ]);
 
 export function isTawnyName(token: string): boolean {

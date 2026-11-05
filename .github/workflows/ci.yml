@@ -24,6 +24,8 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - name: Build and smoke-test the Windows helpers
         run: pnpm build:native
+      - name: Check the wake phrase is recognized
+        run: pnpm test:wake
       - run: pnpm typecheck
       - run: pnpm test
       - run: pnpm build

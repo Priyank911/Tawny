@@ -45,6 +45,8 @@ Turn on **Settings → Hands-free and voice control → Listen for “Hey Tawny�
 2. Say your request, in the same breath or after a short pause. Everything the shortcut does works here: dictation, rewriting a selection, answers, code, images, and computer control.
 3. Stop talking, or say **“Tawny send it”**, to finish. Press **Esc** to cancel.
 
+**With the shortcut instead.** Hold the shortcut and start with “Hey Tawny”, for example “Hey Tawny, open D drive”. Without the wake phrase, shortcut speech is always typed as dictation, so saying “open D drive” on its own types those words. This is deliberate: a sentence you dictate can never turn into an action on your computer.
+
 Examples: “Hey Tawny, open the Projects folder on D drive.” “Hey Tawny, switch to Chrome.” “Hey Tawny, click the Save button.” “Hey Tawny, scroll down.” “Hey Tawny, write a Python function that reverses a string.”
 
 **Privacy.** The wake phrase is recognised by Windows on this PC. Nothing is uploaded until it is heard; the request is then sent to Groq, which has to confirm it began with “Hey Tawny”, otherwise it is discarded. Turning the switch off releases the microphone. Hands-free pauses while the screen is locked.
