@@ -72,7 +72,7 @@ export function gateTranscript(transcript: string, alwaysRoute = false): { route
 // discarded without a model call.
 // ---------------------------------------------------------------------------
 
-const GREETINGS = new Set(['hey', 'hay', 'hi', 'hai', 'ok', 'okay', 'yo']);
+const GREETINGS = new Set(['hey', 'hay', 'hei', 'he', 'a', 'hi', 'hai', 'hello', 'ok', 'okay', 'yo']);
 const NAME_VARIANTS = new Set([
   'tawny', 'tawney', 'tawni', 'tawnie', 'tawnee', 'tauni', 'tauny', 'taunie', 'tauney', 'tanny', 'tani', 'taani', 'tanni', 'tonny', 'tony', 'toni', 'tonie', 'tonee', 'torni', 'tarni'
 ]);
@@ -90,6 +90,12 @@ export interface WakeSplit {
 }
 
 const LEADING_FILLERS = new Set(['uh', 'um', 'er', 'so', 'and', 'well', 'hmm', 'oh', 'okay', 'ok']);
+
+/** "heytawny" / "hitawny": Whisper sometimes writes the phrase as one word. */
+function joinedWake(token: string): boolean {
+  const match = /^(?:hey|hi|he|hay|ok|okay)(.{4,7})$/.exec(token);
+  return Boolean(match && isTawnyName(match[1]));
+}
 
 /**
  * Detects "hey tawny" at the very start of a hands-free clip (optionally after
@@ -111,6 +117,52 @@ export function splitWakePhrase(transcript: string): WakeSplit {
         original: rest.join(' ').trim()
       };
     }
+  }
+  return { routed: false, command: tokens.filter(Boolean).join(' '), original: transcript.trim() };
+}
+
+/**
+ * Confirms the wake phrase in Whisper's transcript of a hands-free clip and
+ * returns what follows it. More forgiving than splitWakePhrase, which watches
+ * the live room audio. Accepted openings, after at most one stray word (the clip's
+ * pre-roll can catch the tail of an earlier sound) and any fillers:
+ *   greeting + name   "Hey Tawny, ...", "A Tawny ..."
+ *   joined            "HeyTawny ..."
+ *   name alone        "Tawny, ..." (the clip started just after "hey")
+ * The local recognizer has already heard the phrase before this runs, so this
+ * check confirms rather than detects. A phrase buried later in a sentence is
+ * conversation about Tawny, not a command to it.
+ */
+export function confirmWakePhrase(transcript: string): WakeSplit {
+  // "Hey-Tawny" and "D-Drive" split into words; the command keeps the spaced form.
+  const words = transcript.trim().replace(/(\p{L})[-–](\p{L})/gu, '$1 $2').split(/\s+/).filter(Boolean);
+  const tokens = words.map((word) => normalize(word));
+  const routedFrom = (restStart: number): WakeSplit => {
+    const rest = words.slice(restStart);
+    return {
+      routed: true,
+      command: rest.map((word) => normalize(word)).filter(Boolean).join(' '),
+      original: rest.join(' ').trim()
+    };
+  };
+  let start = 0;
+  let strays = 0;
+  while (start < tokens.length) {
+    const token = tokens[start];
+    const next = tokens[start + 1];
+    if (!token) {
+      start += 1;
+      continue;
+    }
+    if (GREETINGS.has(token) && next && isTawnyName(next)) return routedFrom(start + 2);
+    if (joinedWake(token) || isTawnyName(token)) return routedFrom(start + 1);
+    if (LEADING_FILLERS.has(token)) {
+      start += 1;
+      continue;
+    }
+    if (strays >= 1 || start >= 3) break;
+    strays += 1;
+    start += 1;
   }
   return { routed: false, command: tokens.filter(Boolean).join(' '), original: transcript.trim() };
 }

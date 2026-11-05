@@ -86,10 +86,11 @@ Delete the Tawny/voicerouter application-data folder to clear its local images, 
 2. “No speech recognizer”: add an English speech language in Windows **Settings → Time and language → Speech**.
 3. “No microphone”: allow desktop apps to use the microphone in Windows privacy settings and check the default input device.
 4. Say the phrase clearly, then your request. If it keeps missing, use the shortcut; both paths do the same things. Check **Live log** for `wake.start`, `gate.result` and `job.discarded`.
+5. “I heard … not ‘Hey Tawny’, so I did nothing”: the PC heard the wake phrase but the transcription did not start with it. Pause for a moment after “Hey Tawny”, or say the name clearly. `gate.rejected` in the log shows the opening words that were heard.
 
 ### Voice control did nothing or stopped
 
-Check **Live log** for `control.*` events. Tawny stops when you move the mouse, when a name matches several items, when the front window is an administrator or terminal window, or when `tawny-control.exe` is missing (reinstall Tawny).
+Check **Live log** for `control.*` events. Apps are found by their Start menu name, including Microsoft Store apps such as WhatsApp and Spotify. Tawny stops when you move the mouse, when a name matches several items, when the front window is an administrator or terminal window, or when `tawny-control.exe` is missing (reinstall Tawny).
 
 ### The shortcut does nothing
 

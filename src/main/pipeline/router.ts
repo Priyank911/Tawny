@@ -44,6 +44,14 @@ export interface HeuristicRoute {
 }
 
 export const CLASSIFY_MIN_CONFIDENCE = 0.75;
+/**
+ * Computer control has its own safety net (a validated plan, a closed verb set,
+ * confirmation for anything risky), and someone who said "Hey Tawny, recycle
+ * bin" wants an action rather than those words typed out. So a wake-phrase
+ * request the decider thinks is control needs less certainty than one it
+ * thinks should produce text.
+ */
+export const CONTROL_MIN_CONFIDENCE = 0.5;
 
 export function heuristicRoute(input: RouteInput): HeuristicRoute {
   const initialCommand = (input.gateRouted && input.gateCommand ? input.gateCommand : input.transcript).trim();
@@ -90,7 +98,8 @@ export function reconcileIntent(route: HeuristicRoute, decision: ClefDecisionRes
   if (route.matched) return { intent: route.intent, reason: 'guardrail' };
   if (route.consult !== 'classify') return { intent: 'plain_dictation', reason: 'not-addressed' };
   if (!decision || decision.usedFallback) return { intent: 'plain_dictation', reason: 'decider-unavailable' };
-  if (decision.confidence < CLASSIFY_MIN_CONFIDENCE) return { intent: 'plain_dictation', reason: 'low-confidence' };
+  const minimum = decision.intent === 'computer_control' ? CONTROL_MIN_CONFIDENCE : CLASSIFY_MIN_CONFIDENCE;
+  if (decision.confidence < minimum) return { intent: 'plain_dictation', reason: 'low-confidence' };
   if (decision.intent === 'text_rewrite' && !selectedText) return { intent: 'plain_dictation', reason: 'nothing-selected' };
   return { intent: decision.intent, reason: 'decider' };
 }

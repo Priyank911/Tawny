@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { gateTranscriptDetailed, gateTranscript, splitWakePhrase, stripSendPhrase } from '../src/main/pipeline/gate';
-import { CLASSIFY_MIN_CONFIDENCE, heuristicRoute, needsSelectionCapture, reconcileIntent, type RouteInput } from '../src/main/pipeline/router';
+import { CLASSIFY_MIN_CONFIDENCE, CONTROL_MIN_CONFIDENCE, heuristicRoute, needsSelectionCapture, reconcileIntent, type RouteInput } from '../src/main/pipeline/router';
 
 function input(transcript: string, over: Partial<RouteInput> = {}): RouteInput {
   const gate = gateTranscriptDetailed(transcript);
@@ -82,7 +82,8 @@ describe('reconciling the decider', () => {
     expect(reconcileIntent(unmatched, decision('text_query'), '').intent).toBe('text_query');
   });
   it('falls back to dictation instead of guessing', () => {
-    expect(reconcileIntent(unmatched, decision('computer_control', CLASSIFY_MIN_CONFIDENCE - 0.05), '').intent).toBe('plain_dictation');
+    expect(reconcileIntent(unmatched, decision('computer_control', CONTROL_MIN_CONFIDENCE - 0.05), '').intent).toBe('plain_dictation');
+    expect(reconcileIntent(unmatched, decision('text_query', CLASSIFY_MIN_CONFIDENCE - 0.05), '').intent).toBe('plain_dictation');
     expect(reconcileIntent(unmatched, { ...decision('computer_control'), usedFallback: true }, '').intent).toBe('plain_dictation');
     expect(reconcileIntent(unmatched, undefined, '').intent).toBe('plain_dictation');
     expect(reconcileIntent(unmatched, decision('text_rewrite'), '').reason).toBe('nothing-selected');

@@ -102,13 +102,13 @@ function parseOpen(rest: string): Action | undefined {
   const domain = spokenDomain(text.replace(/^(?:the\s+)?(?:website|site|web\s*page|page)\s+/i, ''));
   if (domain) return { verb: 'open_url', url: /^https?:\/\//i.test(domain) ? domain : `https://${domain}` };
 
-  const driveWhole = /^(?:the\s+|my\s+|that\s+|this\s+)?(?:(?:drive\s+([a-z])\b:?)|(?:([a-z])\b:?\s*drive))$/i.exec(text);
+  const driveWhole = /^(?:the\s+|my\s+|that\s+|this\s+)?(?:(?:drive[\s-]*([a-z])\b:?)|(?:([a-z])\b:?[\s-]*drive))$/i.exec(text);
   if (driveWhole) {
     const letter = (driveWhole[1] ?? driveWhole[2]).toUpperCase();
     return { verb: 'open', target: `${letter}:`, drive: letter, hint: 'drive' };
   }
 
-  const driveInside = /\b(?:in|on|from|inside|under|within|of)\s+(?:the\s+|that\s+|this\s+|my\s+)?(?:(?:drive\s+([a-z])\b:?)|(?:([a-z])\b:?\s*drive)|(?:([a-z])\s+colon))\b/i.exec(text);
+  const driveInside = /\b(?:in|on|from|inside|under|within|of)\s+(?:the\s+|that\s+|this\s+|my\s+)?(?:(?:drive[\s-]*([a-z])\b:?)|(?:([a-z])\b:?[\s-]*drive)|(?:([a-z])\s+colon))\b/i.exec(text);
   if (driveInside) {
     drive = (driveInside[1] ?? driveInside[2] ?? driveInside[3]).toUpperCase();
     text = `${text.slice(0, driveInside.index)} ${text.slice(driveInside.index + driveInside[0].length)}`;
