@@ -18,6 +18,7 @@ import { WakeService } from './wake/wakeService';
 import type { ChildLike } from './native/lineProcess';
 import { resolveNativeBinary } from './native/binaries';
 import { encodeWav } from '../shared/audio/wav';
+import { shouldTranscribe } from '../shared/audio/captureCore';
 import { generateWithCloudflareFlux } from './providers/cloudflareFlux';
 import { transcribeWithGroq } from './providers/groqWhisper';
 import {
@@ -1093,22 +1094,60 @@ function startWakeSession(): void {
   actor.send({ type: 'AUDIO_READY' });
 }
 
+/**
+ * The Windows recognizer has its own end-of-sentence detection, which does not
+ * depend on how loud the microphone is. When it reports a finished sentence
+ * during a session, capture ends shortly after instead of waiting for the
+ * engine's silence timer. More partial results in that window mean the person
+ * is still talking, so the end is cancelled until the next finished sentence.
+ */
+const SENTENCE_END_DELAY_MS = 700;
+let sentenceEndTimer: NodeJS.Timeout | undefined;
+
+function scheduleSentenceEnd(): void {
+  if (!wakeSessionActive) return;
+  cancelSentenceEnd();
+  sentenceEndTimer = setTimeout(() => {
+    sentenceEndTimer = undefined;
+    if (!wakeSessionActive) return;
+    logPipeline({ event: 'wake.sentence_end', message: 'The speech recognizer heard the end of the request.', jobId: activeJobId, stage: 'capture' });
+    engine.endSession('recognizer');
+  }, SENTENCE_END_DELAY_MS);
+}
+
+function cancelSentenceEnd(): void {
+  if (sentenceEndTimer) clearTimeout(sentenceEndTimer);
+  sentenceEndTimer = undefined;
+}
+
 function handleWakeClip(clip: EngineClip): void {
+  cancelSentenceEnd();
   if (!wakeSessionActive) return;
   wakeSessionActive = false;
   wake?.sessionEnded();
   if (snapshot.source !== 'wake' || snapshot.state !== 'recording') return; // cancelled or replaced while capturing
-  if (clip.reason === 'cancelled' || clip.reason === 'no_command') {
-    discardJob(clip.reason === 'no_command' ? 'Hey Tawny was heard but no command followed.' : 'The hands-free capture was cancelled.');
+  // Microphone levels go in the log for every wake, so a quiet microphone or a noisy room shows up in diagnostics.
+  const levels = { durationMs: String(clip.durationMs), voicedMs: String(clip.commandVoicedMs), peakRms: clip.peakRms.toFixed(4), noiseFloor: clip.noiseFloor.toFixed(4) };
+  if (!shouldTranscribe(clip)) {
+    logPipeline({ event: 'wake.clip', message: `Hands-free capture ended without speech (${clip.reason}).`, jobId: activeJobId, stage: 'capture', data: levels });
+    if (clip.reason === 'cancelled') {
+      discardJob('The hands-free capture was cancelled.');
+    } else {
+      const message = 'I heard “Hey Tawny” but nothing after it. Say your request right after the wake phrase.';
+      logPipeline({ event: 'job.discarded', message, jobId: activeJobId, stage: 'capture' });
+      snapshot = { ...snapshot, message };
+      actor.send({ type: 'FAIL', message });
+    }
     return;
   }
-  logPipeline({ event: 'wake.clip', message: `Hands-free capture finished (${clip.reason}).`, jobId: activeJobId, stage: 'capture', data: { durationMs: String(clip.durationMs), voicedMs: String(clip.commandVoicedMs) } });
+  logPipeline({ event: 'wake.clip', message: `Hands-free capture finished (${clip.reason}).`, jobId: activeJobId, stage: 'capture', data: levels });
   actor.send({ type: 'STOP' });
   void processAudio([encodeWav(clip.samples)], { source: 'wake', mimeType: 'audio/wav' }).catch(() => undefined);
 }
 
 /** The engine went away mid-capture (error, sleep, lock): drop the half-heard command instead of leaving the pipeline stuck. */
 function abandonWakeSession(): void {
+  cancelSentenceEnd();
   if (!wakeSessionActive) return;
   wakeSessionActive = false;
   wake?.sessionEnded();
@@ -1126,7 +1165,12 @@ function ensureWake(): WakeService | undefined {
     if (engineFailed) return;
     publishHandsFree(status);
   });
-  wake.on('wake', startWakeSession);
+  wake.on('wake', (signal: { complete?: boolean }) => {
+    startWakeSession();
+    if (signal.complete) scheduleSentenceEnd();
+  });
+  wake.on('sentence_end', scheduleSentenceEnd);
+  wake.on('speech', cancelSentenceEnd);
   wake.on('send', () => {
     if (wakeSessionActive) {
       logPipeline({ event: 'wake.send', message: 'Send phrase heard; finishing the capture.', jobId: activeJobId, stage: 'capture' });

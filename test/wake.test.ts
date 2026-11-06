@@ -13,9 +13,22 @@ describe('WakeDetector', () => {
   it('fires once per utterance even as the hypothesis keeps growing', () => {
     const { detector } = make();
     expect(detector.hear('hey', 'hyp')).toBeUndefined();
-    expect(detector.hear('hey tawny', 'hyp')).toEqual({ type: 'wake' });
-    expect(detector.hear('hey tawny open', 'hyp')).toBeUndefined();
-    expect(detector.hear('hey tawny open downloads', 'final')).toBeUndefined();
+    expect(detector.hear('hey tawny', 'hyp')).toEqual({ type: 'wake', complete: false });
+    // Inside the session, partial results mean "still talking" and the final result ends the sentence.
+    expect(detector.hear('hey tawny open', 'hyp')).toEqual({ type: 'speech' });
+    expect(detector.hear('hey tawny open downloads', 'final')).toEqual({ type: 'sentence_end' });
+  });
+
+  it('marks a wake that arrives with the whole request as complete', () => {
+    const { detector } = make();
+    expect(detector.hear('hey tawny open d drive', 'final')).toEqual({ type: 'wake', complete: true });
+  });
+
+  it('keeps listening when only the wake phrase was finished', () => {
+    const { detector } = make();
+    detector.hear('hey tawny', 'hyp');
+    expect(detector.hear('hey tawny', 'final')).toBeUndefined();
+    expect(detector.hear('open whatsapp', 'final')).toEqual({ type: 'sentence_end' });
   });
 
   it('ignores conversation that merely resembles the wake phrase', () => {
@@ -30,9 +43,9 @@ describe('WakeDetector', () => {
     const { detector } = make();
     expect(detector.hear('tawny send it', 'hyp')).toBeUndefined();
     detector.hear('hey tawny', 'hyp');
-    expect(detector.hear('hey tawny make a sunset image tawny', 'hyp')).toBeUndefined();
+    expect(detector.hear('hey tawny make a sunset image tawny', 'hyp')).toEqual({ type: 'speech' });
     expect(detector.hear('hey tawny make a sunset image tawny send it', 'hyp')).toEqual({ type: 'send' });
-    expect(detector.hear('hey tawny make a sunset image tawny send it', 'final')).toBeUndefined();
+    expect(detector.hear('hey tawny make a sunset image tawny send it', 'final')).not.toEqual({ type: 'send' });
   });
 
   it('still catches the send phrase in the final result when no hypothesis did', () => {
@@ -44,7 +57,7 @@ describe('WakeDetector', () => {
   it('does not treat "send it" in ordinary dictation as the send phrase', () => {
     const { detector } = make();
     detector.hear('hey tawny', 'hyp');
-    expect(detector.hear('hey tawny please send it to john', 'hyp')).toBeUndefined();
+    expect(detector.hear('hey tawny please send it to john', 'hyp')).toEqual({ type: 'speech' });
   });
 
   it('enforces a cooldown after each session', () => {
@@ -56,7 +69,7 @@ describe('WakeDetector', () => {
     expect(detector.hear('hey tawny', 'hyp')).toEqual({ type: 'throttled', reason: 'cooldown' });
     clock.now += 4000;
     detector.hear('something else', 'final');
-    expect(detector.hear('hey tawny', 'hyp')).toEqual({ type: 'wake' });
+    expect(detector.hear('hey tawny', 'hyp')).toEqual({ type: 'wake', complete: false });
   });
 
   it('caps wakes per minute', () => {
@@ -75,10 +88,10 @@ describe('WakeDetector', () => {
 
   it('lets the orchestrator reject a wake without penalty', () => {
     const { detector } = make();
-    expect(detector.hear('hey tawny', 'hyp')).toEqual({ type: 'wake' });
+    expect(detector.hear('hey tawny', 'hyp')).toEqual({ type: 'wake', complete: false });
     detector.cancelWake();
     detector.hear('x', 'final');
-    expect(detector.hear('hey tawny', 'hyp')).toEqual({ type: 'wake' });
+    expect(detector.hear('hey tawny', 'hyp')).toEqual({ type: 'wake', complete: false });
   });
 });
 

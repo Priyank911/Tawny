@@ -14,6 +14,8 @@ export interface EngineClip {
   reason: SessionClip['reason'];
   commandVoicedMs: number;
   durationMs: number;
+  noiseFloor: number;
+  peakRms: number;
 }
 
 export interface EngineStatus {
@@ -35,7 +37,7 @@ export class EngineHost extends EventEmitter {
     ipcMain.on('engine:rms', (event, value: unknown) => {
       if (fromEngine(event.sender) && typeof value === 'number') this.emit('rms', Math.min(1, Math.max(0, value)));
     });
-    ipcMain.on('engine:clip', (event, clip: { pcm: Uint8Array; reason: EngineClip['reason']; commandVoicedMs: number; durationMs: number }) => {
+    ipcMain.on('engine:clip', (event, clip: { pcm: Uint8Array; reason: EngineClip['reason']; commandVoicedMs: number; durationMs: number; noiseFloor?: number; peakRms?: number }) => {
       if (!fromEngine(event.sender) || !(clip?.pcm instanceof Uint8Array)) return;
       const bytes = new Uint8Array(clip.pcm.byteLength - (clip.pcm.byteLength % 2));
       bytes.set(clip.pcm.subarray(0, bytes.length));
@@ -43,7 +45,9 @@ export class EngineHost extends EventEmitter {
         samples: new Int16Array(bytes.buffer, 0, bytes.length / 2),
         reason: clip.reason,
         commandVoicedMs: clip.commandVoicedMs,
-        durationMs: clip.durationMs
+        durationMs: clip.durationMs,
+        noiseFloor: typeof clip.noiseFloor === 'number' ? clip.noiseFloor : 0,
+        peakRms: typeof clip.peakRms === 'number' ? clip.peakRms : 0
       } satisfies EngineClip);
     });
   }
@@ -96,7 +100,7 @@ export class EngineHost extends EventEmitter {
     setTimeout(() => { if (!window.isDestroyed()) window.destroy(); }, 300);
   }
 
-  private send(command: { type: 'start' | 'stop' | 'begin' | 'end'; reason?: 'send_it' | 'cancelled' }): boolean {
+  private send(command: { type: 'start' | 'stop' | 'begin' | 'end'; reason?: 'send_it' | 'recognizer' | 'cancelled' }): boolean {
     if (!this.window || this.window.isDestroyed()) return false;
     this.window.webContents.send('engine:command', command);
     return true;
@@ -106,7 +110,7 @@ export class EngineHost extends EventEmitter {
     return this.send({ type: 'begin' });
   }
 
-  endSession(reason: 'send_it' | 'cancelled'): boolean {
+  endSession(reason: 'send_it' | 'recognizer' | 'cancelled'): boolean {
     return this.send({ type: 'end', reason });
   }
 }

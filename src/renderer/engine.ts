@@ -9,14 +9,14 @@ import { CaptureCore, FRAME_SAMPLES, SAMPLE_RATE, type SessionClip } from '../sh
 
 export interface EngineCommand {
   type: 'start' | 'stop' | 'begin' | 'end';
-  reason?: 'send_it' | 'cancelled';
+  reason?: 'send_it' | 'recognizer' | 'cancelled';
 }
 
 export interface EngineBridge {
   onCommand(listener: (command: EngineCommand) => void): void;
   status(status: { state: 'running' | 'stopped' | 'error'; message?: string }): void;
   rms(value: number): void;
-  clip(clip: { pcm: Uint8Array; reason: SessionClip['reason']; commandVoicedMs: number; durationMs: number }): void;
+  clip(clip: { pcm: Uint8Array; reason: SessionClip['reason']; commandVoicedMs: number; durationMs: number; noiseFloor: number; peakRms: number }): void;
 }
 
 declare global {
@@ -69,7 +69,9 @@ async function start(): Promise<void> {
   if (context) return;
   try {
     stream = await navigator.mediaDevices.getUserMedia({
-      audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: false }
+      // Gain control matches the shortcut recorder: without it a laptop microphone is often too quiet for the
+      // voice detector, and the command after "Hey Tawny" is never heard.
+      audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true }
     });
     context = new AudioContext({ sampleRate: SAMPLE_RATE, latencyHint: 'interactive' });
     if (context.sampleRate !== SAMPLE_RATE) throw new Error(`The audio device does not support ${SAMPLE_RATE} Hz capture.`);
@@ -86,7 +88,9 @@ async function start(): Promise<void> {
           pcm: new Uint8Array(clip.samples.buffer, clip.samples.byteOffset, clip.samples.byteLength),
           reason: clip.reason,
           commandVoicedMs: clip.commandVoicedMs,
-          durationMs: clip.durationMs
+          durationMs: clip.durationMs,
+          noiseFloor: clip.noiseFloor,
+          peakRms: clip.peakRms
         });
       }
     });
