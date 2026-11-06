@@ -43,7 +43,8 @@ export const DEFAULT_ENDPOINTER_CONFIG: EndpointerConfig = {
   resumeVoicedMs: 100
 };
 
-export type EndReason = 'silence' | 'send_it' | 'max' | 'no_command' | 'cancelled';
+/** 'recognizer': the Windows speech recognizer reported that the sentence was finished. */
+export type EndReason = 'silence' | 'send_it' | 'recognizer' | 'max' | 'no_command' | 'cancelled';
 
 export interface EndpointResult {
   reason: EndReason;
@@ -131,8 +132,8 @@ export class SessionEndpointer {
     return undefined;
   }
 
-  /** The user said "tawny send it" or cancelled. */
-  force(reason: 'send_it' | 'cancelled'): EndpointResult | undefined {
+  /** The user said "tawny send it", the recognizer heard the sentence end, or the session was cancelled. */
+  force(reason: 'send_it' | 'recognizer' | 'cancelled'): EndpointResult | undefined {
     if (this.phase === 'done') return undefined;
     return this.finish(reason);
   }

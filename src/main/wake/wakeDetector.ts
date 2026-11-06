@@ -9,7 +9,19 @@ import { splitWakePhrase, stripSendPhrase } from '../pipeline/gate';
  * short transcription at most.
  */
 
-export type WakeSignal = { type: 'wake' } | { type: 'send' } | { type: 'throttled'; reason: 'cooldown' | 'rate' };
+/**
+ * 'wake' carries complete=true when the recognizer reported the wake phrase only
+ * once the whole sentence was over ("hey tawny open d drive" as one final
+ * result): the request has already been said and capture can end at once.
+ * 'sentence_end' is a finished sentence during a session that is more than the
+ * wake phrase; 'speech' is a partial result, meaning the person is still talking.
+ */
+export type WakeSignal =
+  | { type: 'wake'; complete: boolean }
+  | { type: 'send' }
+  | { type: 'sentence_end' }
+  | { type: 'speech' }
+  | { type: 'throttled'; reason: 'cooldown' | 'rate' };
 
 export interface WakeDetectorOptions {
   now?: () => number;
@@ -50,7 +62,11 @@ export class WakeDetector {
         this.sendSent = true;
         return { type: 'send' };
       }
-      return undefined;
+      if (kind === 'hyp') return { type: 'speech' };
+      // A finished "hey tawny" alone means the person paused after the wake phrase: keep listening.
+      const split = splitWakePhrase(text);
+      if (split.routed && !split.command) return undefined;
+      return text.trim() ? { type: 'sentence_end' } : undefined;
     }
 
     if (!this.armed) {
@@ -64,7 +80,8 @@ export class WakeDetector {
     }
 
     if (!this.armed) return undefined;
-    if (!splitWakePhrase(text).routed) return undefined;
+    const split = splitWakePhrase(text);
+    if (!split.routed) return undefined;
 
     this.armed = false;
     this.lastDetectAt = now;
@@ -74,7 +91,7 @@ export class WakeDetector {
     this.wakeTimes.push(now);
     this.session = true;
     this.sendSent = false;
-    return { type: 'wake' };
+    return { type: 'wake', complete: kind === 'final' && split.command.length > 0 };
   }
 
   /** The orchestrator rejected a wake (busy, signed out); allow the next one immediately. */
