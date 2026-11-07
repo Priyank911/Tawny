@@ -45,7 +45,7 @@ Turn on **Settings → Hands-free and voice control → Listen for “Hey Tawny�
 2. Say your request, in the same breath or after a short pause. Everything the shortcut does works here: dictation, rewriting a selection, answers, code, images, and computer control.
 3. Stop talking, or say **“Tawny send it”**, to finish. Press **Esc** to cancel.
 
-**With the shortcut instead.** Hold the shortcut and start with “Hey Tawny”, for example “Hey Tawny, open D drive”. Without the wake phrase, shortcut speech is always typed as dictation, so saying “open D drive” on its own types those words. This is deliberate: a sentence you dictate can never turn into an action on your computer.
+**With the shortcut instead.** Press the shortcut and say “open …”: “open VS Code”, “open this PC”, “open the recycle bin”, “open D drive”. Tawny opens it only if that app, drive, folder or file exists on your PC; otherwise your words are typed as dictation, so “open the door” stays text. Clicking, typing and other actions need “Hey Tawny” first, for example “Hey Tawny, click the Save button”.
 
 Examples: “Hey Tawny, open the Projects folder on D drive.” “Hey Tawny, switch to Chrome.” “Hey Tawny, click the Save button.” “Hey Tawny, scroll down.” “Hey Tawny, write a Python function that reverses a string.”
 

@@ -67,7 +67,7 @@ const SITES: Record<string, string> = {
   instagram: 'https://www.instagram.com', spotify: 'https://open.spotify.com', notion: 'https://www.notion.so'
 };
 
-const THIS_PC = new Set(['this pc', 'my computer', 'computer', 'my pc', 'this computer']);
+const THIS_PC = new Set(['this pc', 'my computer', 'computer', 'my pc', 'this computer', 'pc', 'my laptop', 'this laptop']);
 const RECYCLE = new Set(['recycle bin', 'trash', 'recycle']);
 
 export class TargetResolver {

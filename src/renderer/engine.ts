@@ -69,9 +69,10 @@ async function start(): Promise<void> {
   if (context) return;
   try {
     stream = await navigator.mediaDevices.getUserMedia({
-      // Gain control matches the shortcut recorder: without it a laptop microphone is often too quiet for the
-      // voice detector, and the command after "Hey Tawny" is never heard.
-      audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true }
+      // No automatic gain control: on Windows, Chromium's gain control moves the system microphone volume
+      // itself (measured: 39% -> 100% within seconds). The Windows wake recognizer shares that microphone, so
+      // a volume that keeps changing makes it miss "Hey Tawny". Quiet clips are still sent to Whisper.
+      audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: false }
     });
     context = new AudioContext({ sampleRate: SAMPLE_RATE, latencyHint: 'interactive' });
     if (context.sampleRate !== SAMPLE_RATE) throw new Error(`The audio device does not support ${SAMPLE_RATE} Hz capture.`);

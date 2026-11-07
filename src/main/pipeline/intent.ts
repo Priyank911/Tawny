@@ -1,7 +1,7 @@
 // Local dictionary used as a safe fallback when CLEF is unavailable and as a
 // guardrail when selected text is clearly the target of an edit request.
 const rewritePatterns = [
-  /\b(?:rewrite|reword|rephrase|paraphrase|transform|rework|revise|edit|copyedit|polish|improve|refine|proofread|translate|translation|localize|convert|correct|fix|change|update)\b/,
+  /\b(?:rewrite|reword|rephrase|reframe|reformulate|restructure|paraphrase|transform|rework|revise|edit|copyedit|polish|improve|refine|proofread|translate|translation|localize|convert|correct|fix|change|update|expand|elaborate)\b/,
   /\b(?:grammar|grammatical|gramatical|grammer|spelling|punctuation|typo|clarity|tone|style|professional|formal|casual|informal|friendly|polite|concise|shorter|longer|simpler|simplify|summarize|summary|condense|readable|natural|better|clearer)\b/,
   /\b(?:make|turn|change|update|fix|clean)\b.{0,80}\b(?:professional|formal|casual|friendly|clear|concise|shorter|longer|natural|correct|grammatical|gramatical|grammar|tone|style|better|readable)\b/
 ];
@@ -16,11 +16,15 @@ const queryPatterns = [
 // semantic detector above for callers that need it, but use this stricter
 // dictionary for routing so ordinary speech is never sent to a model just
 // because it contains words such as "what", "how", or "tell me".
+// Each pattern needs a request: a leading verb or "can you / help me". A sentence that merely
+// mentions code ("the code review went well") is dictation.
+const REQUEST_LEAD = '^(?:(?:please|kindly|can you|could you|will you|would you|help me|i want you to|i need you to)\\s+)*';
+const CONTENT_NOUNS = '(?:code|function|script|program|example|email|e mail|mail|message|reply|list|to do list|todo list|checklist|plan|answer|response|content|text|poem|story|essay|paragraph|letter|cover letter|post|tweet|caption|blog|article|summary|speech|bio|description|note|notes|report|proposal|outline|joke|quote|song|lyrics|slogan|tagline|title|headline|resume|cv|agenda|invitation|review|query|regex|algorithm|website|webpage|app)';
 const explicitQueryPatterns = [
-  /^(?:please\s+)?(?:give me|provide|generate|write|draft|compose|show me|produce)\b.{0,100}\b(?:code|function|script|example|email|message|list|plan|answer|response|content)\b/,
-  /\b(?:code|python|javascript|typescript|html|css|sql|function|script|algorithm|regex|calculator|increment|decrement)\b/,
-  /\b(?:explain|calculate|solve|answer)\b.{0,80}\b(?:this|that|it|question|problem|code|function|example)\b/,
-  /\b(?:help me|can you)\b.{0,80}\b(?:write|draft|generate|create|explain|solve|calculate|answer)\b/
+  new RegExp(`${REQUEST_LEAD}(?:give me|provide|generate|write|draft|compose|show me|produce|create|make|prepare|build|come up with|suggest)\\b.{0,100}\\b${CONTENT_NOUNS}s?\\b`),
+  new RegExp(`${REQUEST_LEAD}(?:write|give me|generate|create|make|build|show me|implement)\\b.{0,100}\\b(?:python|javascript|typescript|java|html|css|sql|c\\+\\+|rust|golang|calculator)\\b`),
+  new RegExp(`${REQUEST_LEAD}(?:explain|define|calculate|solve|answer)\\b`),
+  /\b(?:help me|can you|could you)\b.{0,80}\b(?:write|draft|generate|create|explain|solve|calculate|answer)\b/
 ];
 
 const fastRewritePrefix = /^(?:quick|quickly|fast|instant|instantly|speedy)\b(?:\s+please)?\s*/i;

@@ -94,7 +94,8 @@ describe('Microsoft Store apps', () => {
     { name: 'Chrome', appId: 'Chrome' }
   ];
   it('indexes packaged apps and never shells', () => {
-    expect(entriesFromStartApps(startApps).map((entry) => entry.name)).toEqual(['WhatsApp', 'Spotify']);
+    // "Chrome" is a registered desktop app ID, also launchable through shell:AppsFolder.
+    expect(entriesFromStartApps(startApps).map((entry) => entry.name)).toEqual(['WhatsApp', 'Spotify', 'Chrome']);
   });
   it('finds WhatsApp by name', () => {
     const index = new AppIndex();
