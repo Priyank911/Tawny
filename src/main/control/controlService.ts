@@ -204,18 +204,8 @@ export class ControlService {
     };
   }
 
-  async run(options: ControlRunOptions): Promise<ExecResult> {
-    const reason = this.unavailableReason();
-    if (reason) return { ok: false, message: reason };
-    const helper = this.ensureHelper();
-    try {
-      await helper.ensureStarted();
-    } catch (error) {
-      this.helper = undefined;
-      return { ok: false, message: error instanceof Error ? error.message : 'The computer-control helper could not start.' };
-    }
-    await this.refreshIndexes();
-    const resolver = new TargetResolver({
+  private makeResolver(helper: ControlHelper): TargetResolver {
+    return new TargetResolver({
       knownFolders: () => this.knownFolders(),
       drives: () => this.drives(),
       windows: async () => (await helper.windows()).map((window) => ({ hwnd: window.hwnd, title: window.title, exe: window.exe })),
@@ -231,6 +221,45 @@ export class ControlService {
       },
       listFiles: async (dir) => (await readdir(dir, { withFileTypes: true })).filter((entry) => entry.isFile()).map((entry) => entry.name).slice(0, 4000)
     });
+  }
+
+  /**
+   * Whether every "open" step of a plan names something that exists on this PC
+   * (an app, drive, folder, file, known site, This PC or the Recycle Bin), with
+   * one clear match. Used for shortcut speech without the wake phrase: "open VS
+   * Code" runs, "open the door" stays dictation.
+   */
+  async canResolve(plan: Plan): Promise<boolean> {
+    if (this.unavailableReason()) return false;
+    const helper = this.ensureHelper();
+    try {
+      await helper.ensureStarted();
+    } catch {
+      this.helper = undefined;
+      return false;
+    }
+    await this.refreshIndexes();
+    const resolver = this.makeResolver(helper);
+    for (const step of plan.steps) {
+      if (step.verb !== 'open') return false;
+      const resolution = await resolver.resolve({ target: step.target, ...(step.drive ? { drive: step.drive } : {}), ...(step.hint ? { hint: step.hint } : {}) }).catch(() => ({ kind: 'none' as const }));
+      if (resolution.kind === 'none' || ('ambiguous' in resolution && resolution.ambiguous)) return false;
+    }
+    return true;
+  }
+
+  async run(options: ControlRunOptions): Promise<ExecResult> {
+    const reason = this.unavailableReason();
+    if (reason) return { ok: false, message: reason };
+    const helper = this.ensureHelper();
+    try {
+      await helper.ensureStarted();
+    } catch (error) {
+      this.helper = undefined;
+      return { ok: false, message: error instanceof Error ? error.message : 'The computer-control helper could not start.' };
+    }
+    await this.refreshIndexes();
+    const resolver = this.makeResolver(helper);
     const vision = options.vision
       ? new CloudflareVision({
         run: (model, body, timeoutMs, signal) => runCloudflareModel(options.vision!.accountId, options.vision!.apiToken, model, body, timeoutMs, signal),

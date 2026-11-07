@@ -918,7 +918,13 @@ async function processAudio(segments: Uint8Array[], options: ProcessOptions): Pr
     }
     const tier = decision?.tier ?? 'low';
     const resolved = reconcileIntent(route, decision, selectedText);
-    const intent = resolved.intent;
+    let intent = resolved.intent;
+    // Shortcut "open X" without the wake phrase acts only when X exists here; "open the door" is dictation.
+    if (route.tentative && route.control && intent === 'computer_control') {
+      const real = await control.canResolve(route.control).catch(() => false);
+      logPipeline({ event: 'control.tentative', message: real ? 'Shortcut command names something on this PC; running it.' : 'Shortcut speech looked like a command but names nothing on this PC; typing it as dictation.', jobId: activeJobId, stage: 'decide', data: { resolved: String(real) } });
+      if (!real) intent = 'plain_dictation';
+    }
     const routedCommand = route.command;
 
     logPipeline({

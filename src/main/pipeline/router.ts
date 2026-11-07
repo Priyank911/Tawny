@@ -40,6 +40,11 @@ export interface HeuristicRoute {
   /** A deterministic guardrail chose the intent. */
   matched: boolean;
   control?: Plan;
+  /**
+   * Shortcut speech without the wake phrase that reads as "open X". It runs
+   * only if X exists on this PC; otherwise the words are typed as dictation.
+   */
+  tentative?: boolean;
   consult: ConsultMode;
 }
 
@@ -64,6 +69,16 @@ export function heuristicRoute(input: RouteInput): HeuristicRoute {
   if (input.gateRouted && input.gateOriginal) {
     const control = parseControlCommand(input.gateOriginal);
     if (control) return { command, fastRewrite, intent: 'computer_control', matched: true, control, consult: 'none' };
+  }
+
+  // The shortcut is pressed on purpose, so "open VS Code" without "Hey Tawny" may open it too, but
+  // only plain open commands, and only if the target is real (checked before acting). This also keeps
+  // "open VS Code" from reaching the code-answer rule below because it contains the word "code".
+  if (input.source === 'hotkey' && !input.gateRouted && !input.selectedText) {
+    const control = parseControlCommand(input.transcript);
+    if (control && control.steps.every((step) => step.verb === 'open')) {
+      return { command, fastRewrite, intent: 'computer_control', matched: true, control, tentative: true, consult: 'none' };
+    }
   }
 
   const image = isImageGenerationRequest(command) || isImageGenerationRequest(input.transcript);

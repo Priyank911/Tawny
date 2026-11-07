@@ -153,7 +153,7 @@ function App(): ReactElement {
       cancelledCaptureRef.current = false;
       stopRequestedRef.current = false;
       window.voiceRouter.logCapture({ event: 'capture.permission.request', message: 'Requesting microphone access.' });
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true } });
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: false } });
       streamRef.current = stream;
       chunksRef.current = [];
       segmentsRef.current = [];

@@ -114,6 +114,11 @@ function parseOpen(rest: string): Action | undefined {
     text = `${text.slice(0, driveInside.index)} ${text.slice(driveInside.index + driveInside[0].length)}`;
   }
 
+  // Names that contain a word the cleanup below would strip: "this PC" is not "the PC", and
+  // "file explorer" is an app, not a file called "explorer".
+  if (/^(?:the\s+)?(?:this|my)\s+(?:pc|computer|laptop)[.!?]*$/i.test(text.trim())) return { verb: 'open', target: 'this pc', hint: 'any' };
+  if (/^(?:the\s+)?(?:file|windows)\s+explorer[.!?]*$/i.test(text.trim())) return { verb: 'open', target: 'File Explorer', hint: 'app' };
+
   if (/\b(?:folder|directory)\b/i.test(text)) hint = 'folder';
   else if (/\b(?:app|application|program|software)\b/i.test(text)) hint = 'app';
   else if (/\b(?:website|web\s*site|site|web\s*page)\b/i.test(text)) hint = 'site';

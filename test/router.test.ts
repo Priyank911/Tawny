@@ -54,11 +54,18 @@ describe('heuristic routing', () => {
   it('fast rewrite needs no model call to decide', () => {
     expect(heuristicRoute(input('quick fix the grammar', { selectedText: 'me go store' }))).toMatchObject({ intent: 'text_rewrite', fastRewrite: true, consult: 'none' });
   });
-  it('computer control needs the wake phrase', () => {
-    expect(heuristicRoute(input('open the door for me')).intent).toBe('plain_dictation');
+  it('without the wake phrase, only shortcut "open X" is considered, and only tentatively', () => {
+    // The app types it as dictation unless X exists on the PC (ControlService.canResolve).
+    expect(heuristicRoute(input('open the door for me'))).toMatchObject({ intent: 'computer_control', tentative: true });
+    expect(heuristicRoute(input('click the update button')).intent).toBe('plain_dictation');
+    expect(heuristicRoute(input('type hello world')).intent).toBe('plain_dictation');
+    expect(heuristicRoute(input('open downloads', { source: 'wake' })).intent).toBe('plain_dictation');
+  });
+  it('computer control with the wake phrase is not tentative', () => {
     const route = heuristicRoute(input('hey tawny open downloads'));
     expect(route).toMatchObject({ intent: 'computer_control', matched: true, consult: 'none' });
     expect(route.control?.steps[0]).toMatchObject({ verb: 'open', target: 'downloads' });
+    expect(route.tentative).toBeUndefined();
   });
   it('a control verb beats a rewrite-looking word when text is selected', () => {
     const route = heuristicRoute(input('hey tawny click the update button', { selectedText: 'some selected words' }));
