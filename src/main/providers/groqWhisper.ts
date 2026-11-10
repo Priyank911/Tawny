@@ -49,6 +49,16 @@ function retryDelayMs(response: Response | undefined, attempt: number): number {
   return RETRY_BASE_DELAY_MS * (2 ** (attempt - 1)) + Math.floor(Math.random() * 250);
 }
 
+/** The full retry-after Groq asked for (not capped like the in-call retry delay). */
+export function retryAfterHeaderMs(response: Response): number | undefined {
+  const retryAfter = response.headers.get('retry-after');
+  if (!retryAfter) return undefined;
+  const seconds = Number(retryAfter);
+  if (Number.isFinite(seconds) && seconds >= 0) return seconds * 1000;
+  const dateDelay = Date.parse(retryAfter) - Date.now();
+  return Number.isFinite(dateDelay) && dateDelay > 0 ? dateDelay : undefined;
+}
+
 function wait(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -135,7 +145,10 @@ export async function transcribeWithGroq(
     if (!response.ok) {
       const detail = body && typeof body === 'object' && 'error' in body ? String((body as { error?: { message?: unknown } }).error?.message ?? '') : '';
       if (response.status === 408 || response.status === 425 || response.status === 429 || response.status >= 500) {
-        throw new PipelineError('transient', 'stt', detail || `Groq transcription is temporarily unavailable (HTTP ${response.status}). Please try again.`);
+        const message = response.status === 429
+          ? `Groq rate limit reached${detail ? `: ${detail}` : '.'}`
+          : detail || `Groq transcription is temporarily unavailable (HTTP ${response.status}). Please try again.`;
+        throw new PipelineError('transient', 'stt', message, response.status === 429 ? retryAfterHeaderMs(response) : undefined);
       }
       throw new Error(detail || `Groq transcription failed with HTTP ${response.status}.`);
     }

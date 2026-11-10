@@ -5,7 +5,7 @@ import { providerSettingsSchema, type ProviderSettings } from '../shared/contrac
 
 const settingsPath = () => join(app.getPath('userData'), 'credentials.bin');
 
-function secureStorageAvailable(): boolean {
+export function secureStorageAvailable(): boolean {
   if (!safeStorage.isEncryptionAvailable()) return false;
   return process.platform !== 'linux' || safeStorage.getSelectedStorageBackend() !== 'basic_text';
 }

@@ -16,6 +16,17 @@ Tawny is an early-preview desktop voice assistant. This guide covers first launc
 
 The release build already contains Tawny’s Firebase project configuration; users do not need to create an OAuth client. API keys for Groq and Cloudflare are user-provided and are stored encrypted on the device. Create a Groq key in the [Groq console](https://console.groq.com/keys); follow Cloudflare’s [Workers AI REST API setup](https://developers.cloudflare.com/workers-ai/get-started/rest-api/) to create a token and find your account ID.
 
+## The app window
+
+The window has four pages in the left rail:
+
+- **Home**: listening status, shortcut, quick switches, today's tally, what you can say, and recent requests.
+- **Recordings**: requests that failed (no network, Groq busy or rate limited, a model outage). Each one can be transcribed again; once the text is ready you can copy it.
+- **Activity**: every pipeline step, newest first, with Warnings and Errors filters and a button to open the logs folder.
+- **Settings**: shortcut, hands-free and voice control, provider keys, version.
+
+Closing the window keeps Tawny running in the tray.
+
 ## Daily use
 
 The default shortcut is **Ctrl + Alt + Space**. It can be changed in **Settings → Recording shortcut**.
@@ -28,6 +39,7 @@ The default shortcut is **Ctrl + Alt + Space**. It can be changed in **Settings 
 | Ask for an answer or code | Press the shortcut and make an explicit request, such as “write a Python function that sorts a list.” Tawny pastes the generated response at the cursor. |
 | Generate an image | Press the shortcut and describe the image you want. Tawny creates the image, saves a local JPEG, and copies the image to the clipboard. |
 | Cancel a job | Press **Esc** while Tawny is working. |
+| Recover a failed request | If the network drops or Groq is busy, the pill says the recording was saved. Open **Recordings** and choose **Transcribe again** (or **Transcribe all**), then **Copy** the text. |
 
 The microphone stays active until you stop it. A held shortcut also stops capture on key release; or press the shortcut again to stop. Tawny breaks long recordings into one-minute audio segments for transcription.
 
@@ -68,6 +80,7 @@ Tawny requires cloud services for transcription and model-backed tasks:
 - Google handles account authentication. Tawny stores an encrypted Firebase session locally so you do not have to sign in every launch.
 - API credentials and the session are encrypted through Electron’s operating-system secure storage. On Linux, Tawny requires Secret Service (for example GNOME Keyring) or KWallet; it refuses to fall back to plaintext storage.
 - Diagnostic logs are local. They record pipeline stages and lengths, not audio, transcripts, selected text, or API keys. Tawny does not send analytics or crash logs to a remote service.
+- Failed requests are kept in `recovery/` inside `userData` so they can be transcribed again. The audio, the error and any transcript are AES-256-GCM encrypted with a key protected by Windows (DPAPI). Tawny cannot play them back. Audio is deleted as soon as its text is ready, and everything is removed after 7 days (at most 30 recordings or 200 MB). Use **Recordings → Clear all** to remove them sooner.
 - Generated images are saved as `tawny-image-<timestamp>.jpg` inside Tawny’s Electron `userData` directory and are not automatically deleted. The operating system clipboard may also retain the last result.
 
 ### Remove Tawny’s local data
@@ -85,18 +98,18 @@ Delete the Tawny/voicerouter application-data folder to clear its local images, 
 1. Open Settings and read the status line under **Hands-free and voice control**.
 2. “No speech recognizer”: add an English speech language in Windows **Settings → Time and language → Speech**.
 3. “No microphone”: allow desktop apps to use the microphone in Windows privacy settings and check the default input device.
-4. Say the phrase clearly, then your request. If it keeps missing, use the shortcut; both paths do the same things. Check **Live log** for `wake.start`, `gate.result` and `job.discarded`.
+4. Say the phrase clearly, then your request. If it keeps missing, use the shortcut; both paths do the same things. Check **Activity** for `wake.start`, `gate.result` and `job.discarded`.
 5. “I only heard …”: Whisper's transcript had no request in it (for example only “Thank you.”). Say the request a little louder or closer to the microphone. Tawny never changes your Windows microphone volume; if requests are often missed, raise it to 80-100% in Windows **Settings → System → Sound → Input**.
 
 ### Voice control did nothing or stopped
 
-Check **Live log** for `control.*` events. Apps are found by their Start menu name, including Microsoft Store apps such as WhatsApp and Spotify. Tawny stops when you move the mouse, when a name matches several items, when the front window is an administrator or terminal window, or when `tawny-control.exe` is missing (reinstall Tawny).
+Check **Activity** for `control.*` events. Apps are found by their Start menu name, including Microsoft Store apps such as WhatsApp and Spotify. Tawny stops when you move the mouse, when a name matches several items, when the front window is an administrator or terminal window, or when `tawny-control.exe` is missing (reinstall Tawny).
 
 ### The shortcut does nothing
 
 1. Open Settings and check that the status is **Registered**. Use **Test key**.
 2. Try another key combination if another app or the OS already owns it.
-3. Check **Live log** for `hotkey.register.failure`, `hotkey.test.failed`, or `hotkey.ignored.settings`.
+3. Check **Activity** for `hotkey.register.failure`, `hotkey.test.failed`, or `hotkey.ignored.settings`.
 
 ### Sign-in succeeds in the browser but not in Tawny
 
@@ -108,7 +121,7 @@ Verify the intended destination app was focused before starting Tawny. Automatic
 
 ### Find and share useful logs
 
-Open **Live log** in Tawny or read `logs/pipeline.jsonl` inside the application’s `userData` directory. Share only relevant event names and error messages. Remove personal information and never send audio, transcript text, selected text, API keys, or session files.
+Open **Activity** in Tawny or read `logs/pipeline.jsonl` inside the application’s `userData` directory. Share only relevant event names and error messages. Remove personal information and never send audio, transcript text, selected text, API keys, or session files.
 
 ## Updating Tawny
 

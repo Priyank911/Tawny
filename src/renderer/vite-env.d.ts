@@ -1,4 +1,4 @@
-import type { AuthProfile, BehaviorSettings, HandsFreeStatus, HotkeyStatus, HotkeyTestResult, OverlaySnapshot, PipelineLog, ProviderSettings, UpdateNotice } from '../shared/contracts';
+import type { AuthProfile, BehaviorSettings, HandsFreeStatus, HotkeyStatus, HotkeyTestResult, JobHistoryEntry, OverlaySnapshot, PipelineLog, ProviderSettings, RecoveryState, UpdateNotice } from '../shared/contracts';
 
 declare module '*.css';
 
@@ -8,6 +8,17 @@ declare global {
       getSnapshot: () => Promise<OverlaySnapshot>;
       getLogs: () => Promise<PipelineLog[]>;
       onLog: (listener: (entry: PipelineLog) => void) => () => void;
+      openLogsFolder: () => Promise<void>;
+      getHistory: () => Promise<JobHistoryEntry[]>;
+      onHistory: (listener: (history: JobHistoryEntry[]) => void) => () => void;
+      getAppInfo: () => Promise<{ version: string; platform: string }>;
+      windowAction: (action: 'minimize' | 'hide') => Promise<void>;
+      getRecovery: () => Promise<RecoveryState>;
+      onRecovery: (listener: (state: RecoveryState) => void) => () => void;
+      retryRecording: (id?: string) => Promise<void>;
+      removeRecording: (id: string) => Promise<void>;
+      clearRecordings: () => Promise<void>;
+      copyRecording: (id: string) => Promise<void>;
       getSettings: () => Promise<ProviderSettings>;
       closeSettings: () => Promise<void>;
       setSettingsOpen: (open: boolean) => void;

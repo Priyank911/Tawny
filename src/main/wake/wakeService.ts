@@ -12,7 +12,7 @@ import { WakeDetector, type WakeDetectorOptions, type WakeSignal } from './wakeD
  */
 
 interface WakeLine {
-  t: 'ready' | 'hyp' | 'final' | 'error';
+  t: 'ready' | 'hyp' | 'final' | 'error' | 'level' | 'end';
   text?: string;
   culture?: string;
   code?: string;
@@ -25,7 +25,22 @@ export interface WakeServiceOptions {
   setTimer?: (callback: () => void, ms: number) => unknown;
   clearTimer?: (handle: unknown) => void;
   maxRestarts?: number;
+  /** Watchdog against a recognizer that silently stops hearing. */
+  watchdog?: {
+    setInterval?: (callback: () => void, ms: number) => unknown;
+    clearInterval?: (handle: unknown) => void;
+    now?: () => number;
+    intervalMs?: number;
+    /** No line at all (not even the 5 s level heartbeat) for this long: the stream is dead. */
+    stallMs?: number;
+    /** Recycle a healthy recognizer this often; long System.Speech sessions degrade. */
+    recycleAfterMs?: number;
+    /** A scheduled recycle waits for this much quiet so nobody is cut off mid-sentence. */
+    quietMs?: number;
+  };
 }
+
+export const WATCHDOG_DEFAULTS = { intervalMs: 10_000, stallMs: 30_000, recycleAfterMs: 20 * 60_000, quietMs: 8_000 };
 
 const ERROR_MESSAGES: Record<string, string> = {
   no_recognizer: 'Windows has no speech recognizer installed. Add an English speech language in Settings, Time and language, Speech.',
@@ -44,6 +59,12 @@ export class WakeService extends EventEmitter {
   private readonly setTimer: (callback: () => void, ms: number) => unknown;
   private readonly clearTimer: (handle: unknown) => void;
   private readonly maxRestarts: number;
+  private readonly watch: Required<NonNullable<WakeServiceOptions['watchdog']>>;
+  private watchHandle: unknown;
+  private recyclePending = false;
+  private readyAt = 0;
+  private lastLineAt = 0;
+  private lastSpeechAt = 0;
 
   constructor(options: WakeServiceOptions) {
     super();
@@ -52,6 +73,19 @@ export class WakeService extends EventEmitter {
     this.setTimer = options.setTimer ?? ((callback, ms) => setTimeout(callback, ms));
     this.clearTimer = options.clearTimer ?? ((handle) => clearTimeout(handle as NodeJS.Timeout));
     this.maxRestarts = options.maxRestarts ?? 5;
+    this.watch = {
+      setInterval: options.watchdog?.setInterval ?? ((callback, ms) => {
+        const handle = setInterval(callback, ms);
+        handle.unref?.();
+        return handle;
+      }),
+      clearInterval: options.watchdog?.clearInterval ?? ((handle) => clearInterval(handle as NodeJS.Timeout)),
+      now: options.watchdog?.now ?? Date.now,
+      intervalMs: options.watchdog?.intervalMs ?? WATCHDOG_DEFAULTS.intervalMs,
+      stallMs: options.watchdog?.stallMs ?? WATCHDOG_DEFAULTS.stallMs,
+      recycleAfterMs: options.watchdog?.recycleAfterMs ?? WATCHDOG_DEFAULTS.recycleAfterMs,
+      quietMs: options.watchdog?.quietMs ?? WATCHDOG_DEFAULTS.quietMs
+    };
     this.process.on('line', (line: string) => this.onLine(line));
     this.process.on('exit', () => this.onExit());
     this.process.on('error', (error: Error) => this.fail(describeHelperStartError('The speech recognizer (tawny-wake.exe)', error)));
@@ -67,10 +101,13 @@ export class WakeService extends EventEmitter {
     this.restarts = 0;
     this.setStatus({ enabled: true, state: 'starting', message: 'Starting the speech recognizer…' });
     this.process.start();
+    this.startWatchdog();
   }
 
   stop(): void {
     this.wanted = false;
+    this.stopWatchdog();
+    this.recyclePending = false;
     if (this.restartTimer !== undefined) this.clearTimer(this.restartTimer);
     this.restartTimer = undefined;
     this.process.stop();
@@ -96,6 +133,35 @@ export class WakeService extends EventEmitter {
     this.detector.sessionEnded();
   }
 
+  /** Restarts a recognizer that stopped hearing, without counting it as a crash. */
+  recycle(reason: 'stalled' | 'scheduled'): void {
+    if (!this.wanted || this.paused || this.recyclePending || !this.process.alive) return;
+    this.recyclePending = true;
+    this.emit('recycle', reason);
+    this.process.stop();
+  }
+
+  private startWatchdog(): void {
+    if (this.watchHandle !== undefined) return;
+    this.watchHandle = this.watch.setInterval(() => this.checkHealth(), this.watch.intervalMs);
+  }
+
+  private stopWatchdog(): void {
+    if (this.watchHandle !== undefined) this.watch.clearInterval(this.watchHandle);
+    this.watchHandle = undefined;
+  }
+
+  /** Called by the watchdog interval; public for tests. */
+  checkHealth(): void {
+    if (!this.wanted || this.paused || this.status.state !== 'listening') return;
+    const now = this.watch.now();
+    if (now - this.lastLineAt > this.watch.stallMs) {
+      this.recycle('stalled');
+      return;
+    }
+    if (now - this.readyAt > this.watch.recycleAfterMs && now - this.lastSpeechAt > this.watch.quietMs) this.recycle('scheduled');
+  }
+
   private onLine(line: string): void {
     let parsed: WakeLine;
     try {
@@ -103,7 +169,12 @@ export class WakeService extends EventEmitter {
     } catch {
       return;
     }
+    const now = this.watch.now();
+    this.lastLineAt = now;
+    if (parsed.t === 'level' || parsed.t === 'end') return;
+    if (parsed.t === 'hyp' || parsed.t === 'final') this.lastSpeechAt = now;
     if (parsed.t === 'ready') {
+      this.readyAt = now;
       this.restarts = 0;
       this.setStatus({ enabled: true, state: 'listening', message: `Listening for “Hey Tawny”${parsed.culture ? ` (${parsed.culture})` : ''}.` });
       return;
@@ -123,6 +194,14 @@ export class WakeService extends EventEmitter {
   }
 
   private onExit(): void {
+    if (this.recyclePending) {
+      this.recyclePending = false;
+      if (this.wanted && !this.paused) {
+        this.setStatus({ enabled: true, state: 'starting', message: 'Refreshing the speech recognizer…' });
+        this.process.start();
+      }
+      return;
+    }
     if (!this.wanted || this.paused) return;
     if (this.status.state === 'error') return;
     if (this.restarts >= this.maxRestarts) {
@@ -139,7 +218,10 @@ export class WakeService extends EventEmitter {
   }
 
   private fail(message: string, permanent = false): void {
-    if (permanent) this.wanted = false;
+    if (permanent) {
+      this.wanted = false;
+      this.stopWatchdog();
+    }
     this.process.stop();
     this.setStatus({ enabled: this.wanted, state: 'error', message });
   }

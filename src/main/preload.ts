@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer } from 'electron';
-import type { AuthProfile, BehaviorSettings, HandsFreeStatus, HotkeyStatus, HotkeyTestResult, OverlaySnapshot, PipelineLog, ProviderSettings, UpdateNotice } from '../shared/contracts';
+import type { AuthProfile, BehaviorSettings, HandsFreeStatus, HotkeyStatus, HotkeyTestResult, JobHistoryEntry, OverlaySnapshot, PipelineLog, ProviderSettings, RecoveryState, UpdateNotice } from '../shared/contracts';
 
 contextBridge.exposeInMainWorld('voiceRouter', {
   getSnapshot: (): Promise<OverlaySnapshot> => ipcRenderer.invoke('overlay:get-snapshot'),
@@ -9,6 +9,25 @@ contextBridge.exposeInMainWorld('voiceRouter', {
     ipcRenderer.on('pipeline:log', handler);
     return () => ipcRenderer.removeListener('pipeline:log', handler);
   },
+  openLogsFolder: (): Promise<void> => ipcRenderer.invoke('logs:open-folder'),
+  getHistory: (): Promise<JobHistoryEntry[]> => ipcRenderer.invoke('history:get'),
+  onHistory: (listener: (history: JobHistoryEntry[]) => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, history: JobHistoryEntry[]) => listener(history);
+    ipcRenderer.on('history:update', handler);
+    return () => ipcRenderer.removeListener('history:update', handler);
+  },
+  getAppInfo: (): Promise<{ version: string; platform: string }> => ipcRenderer.invoke('app:info'),
+  windowAction: (action: 'minimize' | 'hide'): Promise<void> => ipcRenderer.invoke('app:window', action),
+  getRecovery: (): Promise<RecoveryState> => ipcRenderer.invoke('recovery:get'),
+  onRecovery: (listener: (state: RecoveryState) => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, state: RecoveryState) => listener(state);
+    ipcRenderer.on('recovery:update', handler);
+    return () => ipcRenderer.removeListener('recovery:update', handler);
+  },
+  retryRecording: (id?: string): Promise<void> => ipcRenderer.invoke('recovery:retry', id),
+  removeRecording: (id: string): Promise<void> => ipcRenderer.invoke('recovery:remove', id),
+  clearRecordings: (): Promise<void> => ipcRenderer.invoke('recovery:clear'),
+  copyRecording: (id: string): Promise<void> => ipcRenderer.invoke('recovery:copy', id),
   getSettings: (): Promise<ProviderSettings> => ipcRenderer.invoke('settings:get'),
   closeSettings: (): Promise<void> => ipcRenderer.invoke('settings:close'),
   setSettingsOpen: (open: boolean): void => ipcRenderer.send('settings:state', open),

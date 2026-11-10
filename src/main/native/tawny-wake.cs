@@ -122,6 +122,9 @@ namespace Tawny
             return value.ToString("0.00", CultureInfo.InvariantCulture);
         }
 
+        private static DateTime lastLevel = DateTime.MinValue;
+        private const int LevelIntervalMs = 5000;
+
         private static void WatchStdin()
         {
             try
@@ -212,8 +215,19 @@ namespace Tawny
                 engine.RecognizeCompleted += delegate(object sender, RecognizeCompletedEventArgs e)
                 {
                     if (e.Error != null) EmitError("start_failed", e.Error.Message);
-                    // Live input only completes on error; a test file completes when it ends.
-                    if (e.Error != null || wavPath != null) Quit.Set();
+                    // Live input can also end without an error (the device slept, was switched or
+                    // removed). Exit either way so Tawny restarts the recognizer instead of this
+                    // process sitting idle and deaf. A test file completes when it ends.
+                    if (e.Error == null && wavPath == null) Emit("{\"t\":\"end\",\"reason\":\"input_ended\"}");
+                    Quit.Set();
+                };
+                // Heartbeat: audio level every few seconds proves the microphone stream is alive.
+                engine.AudioLevelUpdated += delegate(object sender, AudioLevelUpdatedEventArgs e)
+                {
+                    DateTime now = DateTime.UtcNow;
+                    if ((now - lastLevel).TotalMilliseconds < LevelIntervalMs) return;
+                    lastLevel = now;
+                    Emit("{\"t\":\"level\",\"l\":" + e.AudioLevel.ToString(CultureInfo.InvariantCulture) + "}");
                 };
             }
             catch (Exception ex)
