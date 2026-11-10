@@ -25,6 +25,14 @@ function tempStore(now?: () => number, keys = fakeKeys) {
   return { dir, store: new RecoveryStore(dir, keys, now) };
 }
 
+async function settle(service: RecoveryService): Promise<void> {
+  for (let i = 0; i < 100; i++) {
+    const { recordings } = await service.state();
+    if (recordings.every((item) => item.status !== 'working')) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+}
+
 const audio = new Uint8Array(Buffer.from('PRIVATE-SPOKEN-AUDIO-'.repeat(50), 'utf8'));
 
 describe('RecoveryStore', () => {
@@ -132,7 +140,7 @@ describe('RecoveryService', () => {
     expect(await service.keep({ source: 'hotkey', mimeType: 'audio/webm', segments: [audio], reason: 'offline', stage: 'stt' })).toBe(true);
     const [item] = (await service.state()).recordings;
     await service.retry(item.id);
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    await settle(service);
     const [done] = (await service.state()).recordings;
     expect(done).toMatchObject({ status: 'transcribed', transcript: 'hello there', hasAudio: false, attempts: 1 });
     expect(sent).toEqual([1]);
@@ -145,7 +153,7 @@ describe('RecoveryService', () => {
     const service = new RecoveryService({ store, budget, transcribe: async () => { throw new PipelineError('transient', 'stt', 'Groq rate limit reached.', 120_000); }, sleep: async () => undefined });
     await service.keep({ source: 'wake', mimeType: 'audio/wav', segments: [audio], durationMs: 3000, reason: 'offline', stage: 'stt' });
     await service.retry();
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    await settle(service);
     const [item] = (await service.state()).recordings;
     expect(item).toMatchObject({ status: 'waiting', hasAudio: true, attempts: 1 });
     expect(item.retryAfter).toBeDefined();

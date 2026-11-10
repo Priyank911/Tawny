@@ -118,3 +118,20 @@ export function reconcileIntent(route: HeuristicRoute, decision: ClefDecisionRes
   if (decision.intent === 'text_rewrite' && !selectedText) return { intent: 'plain_dictation', reason: 'nothing-selected' };
   return { intent: decision.intent, reason: 'decider' };
 }
+
+/**
+ * Hands-free guard against false wakes. The Windows recognizer turns "hey
+ * honey", "hey Tony" or background talk into "hey Tawny" with the same
+ * confidence as the real phrase, so it can only be the trigger. When Whisper
+ * also heard "Hey Tawny", the request stands. When it did not, the clip is
+ * accepted only if it is an unmistakable command matched by the fixed
+ * patterns (open X, an image, code or a written piece, a rewrite of selected
+ * text). Conversation, dictation and anything only a model would classify are
+ * dropped: overheard speech must never be typed or acted on.
+ */
+export function acceptWakeWithoutPhrase(route: HeuristicRoute, selectedText: string): boolean {
+  if (!route.matched) return false;
+  if (route.intent === 'plain_dictation') return false;
+  if (route.intent === 'text_rewrite') return Boolean(selectedText);
+  return true;
+}

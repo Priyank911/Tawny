@@ -192,7 +192,7 @@ export class RecoveryStore {
   }
 
   /** A transcription succeeded: keep the text, destroy the audio. */
-  async complete(id: string, transcript: string): Promise<RecoveryRecording | undefined> {
+  async complete(id: string, transcript: string, attempts?: number): Promise<RecoveryRecording | undefined> {
     await rm(join(this.dir, `${id}.bin`), { force: true });
     const index = await this.load();
     const item = index.find((entry) => entry.id === id);
@@ -200,7 +200,9 @@ export class RecoveryStore {
     item.status = 'transcribed';
     item.transcript = transcript;
     item.hasAudio = false;
+    if (attempts !== undefined) item.attempts = attempts;
     delete item.retryAfter;
+    delete item.lastError;
     await this.persist();
     return item;
   }

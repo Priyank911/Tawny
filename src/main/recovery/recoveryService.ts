@@ -149,8 +149,7 @@ export class RecoveryService extends EventEmitter {
         await store.update(id, { status: 'failed', attempts, lastError: 'Groq heard no speech in this recording.' });
         return;
       }
-      await store.complete(id, transcript);
-      await store.update(id, { attempts });
+      await store.complete(id, transcript, attempts);
       this.log('recovery.retry.success', 'A saved recording was transcribed.');
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Groq transcription failed.';
