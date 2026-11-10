@@ -174,3 +174,40 @@ export function stripSendPhrase(text: string): { text: string; hadSendPhrase: bo
   const stripped = text.replace(SEND_PHRASE_TAIL, '').trim();
   return { text: stripped, hadSendPhrase: stripped.length !== text.trim().length };
 }
+
+// ---------------------------------------------------------------------------
+// The command of a hands-free request
+//
+// The Windows recognizer on this PC has already heard "Hey Tawny" when a clip
+// reaches Whisper, so that wake is the confirmation. People usually say the
+// phrase, wait for the orb, then speak, and the clip may begin at the command:
+// requiring Whisper to find the phrase again threw those requests away. The
+// phrase is removed when Whisper did hear it; otherwise the whole text is the
+// command. Whisper's well-known filler on near-silence is not a request.
+// ---------------------------------------------------------------------------
+
+const WHISPER_FILLER = new Set([
+  'thank you', 'thanks', 'thank you very much', 'thank you so much', 'thanks for watching', 'thank you for watching',
+  'thanks for listening', 'thank you for listening', 'here you go', 'bye', 'bye bye', 'goodbye', 'you', 'okay', 'ok',
+  'so', 'um', 'uh', 'hmm', 'mm', 'yeah', 'oh', 'ah', 'subscribe', 'please subscribe', 'i m sorry', 'sorry'
+]);
+
+export interface WakeCommand {
+  /** False when nothing usable was said after the wake phrase. */
+  ok: boolean;
+  /** Normalized command (lower case, no punctuation). */
+  text: string;
+  /** The command as spoken, original casing and punctuation. */
+  original: string;
+  /** Whisper's transcript included the wake phrase. */
+  heardWakePhrase: boolean;
+}
+
+export function commandFromWakeTranscript(transcript: string): WakeCommand {
+  const spoken = stripSendPhrase(transcript).text;
+  const split = confirmWakePhrase(spoken);
+  const original = (split.routed ? split.original : spoken).trim().replace(/^[\s,.;:!?-]+/, '');
+  const text = normalize(original);
+  const ok = text.length > 0 && !WHISPER_FILLER.has(text) && !isTawnyName(text);
+  return { ok, text, original, heardWakePhrase: split.routed };
+}

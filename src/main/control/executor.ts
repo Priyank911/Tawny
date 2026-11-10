@@ -147,9 +147,15 @@ export class PlanExecutor {
         await this.deps.shell.launch(resolution.launch);
         return `Starting ${resolution.display}.`;
       case 'window': {
-        const focused = await this.deps.helper.focus(resolution.hwnd);
-        if (!focused) throw new ControlError(`Windows would not bring ${resolution.display} to the front.`);
-        return `Switched to ${resolution.display}.`;
+        const focused = await this.deps.helper.focus(resolution.hwnd).catch(() => false);
+        if (focused) return `Switched to ${resolution.display}.`;
+        // Windows refused to bring it forward. Starting an app that is already running brings its window to
+        // the front for nearly every app (single-instance apps hand over to the running copy).
+        if (resolution.launch) {
+          await this.deps.shell.launch(resolution.launch);
+          return `Opened ${resolution.display}.`;
+        }
+        throw new ControlError(`${resolution.display} is open, but Windows would not bring it to the front. Click it in the taskbar.`);
       }
       case 'path': {
         if (resolution.ambiguous) {

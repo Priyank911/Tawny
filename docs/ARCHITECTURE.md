@@ -14,6 +14,31 @@ Tawny is an Electron desktop app with three runtime layers:
 
 `src/shared/contracts.ts` contains shared Zod schemas and types. Renderer requests cross the preload bridge; the main process validates and performs privileged operations.
 
+### Windows
+
+| Window | Loads | Shows | Never |
+| --- | --- | --- | --- |
+| App window | `index.html?view=main` | Main page, sign-in, Settings, Live log, update notice | Resized into the pill, records audio |
+| Overlay window | `index.html?view=overlay` | Listening orb and status pill at the top centre; owns the shortcut recorder | Takes focus (it is non-focusable, so the app you were in stays the paste target) |
+| Engine window (hands-free only) | `engine.html` | Nothing (hidden); always-on microphone | Exists while hands-free is off |
+
+Both visible windows load the same React page and receive the same events; each view acts only on its own. They used to be one window that was resized to a 620x72 strip for every job, which crushed Settings into the pill when a wake arrived while Settings was open.
+
+## Request workflow (what happens, and what you see when it fails)
+
+Every request ends in exactly one visible outcome: a result, a confirmation prompt, or a message in the pill that says what went wrong. Nothing ends silently.
+
+| Step | Hands-free | Shortcut | If it fails |
+| --- | --- | --- | --- |
+| 1. Start | `tawny-wake.exe` hears "hey/hi/okay Tawny" (local grammar). The orb appears. | Shortcut pressed. The pill appears. | Wake not heard: nothing happens (by design). Mic unavailable: pill says so. |
+| 2. Capture | Engine clip: up to 6 s look-back, ends on the recognizer's end of sentence, ~1.2 s of silence, "Tawny send it", Esc or 60 s. | Recorder until the shortcut is pressed again. | Silent clip: "I heard Hey Tawny but nothing after it." |
+| 3. Transcribe | Groq Whisper (`Hey Tawny.` spelling hint). | Groq Whisper. | Network or key problem: pill shows Groq's error. |
+| 4. Command | The local wake is the confirmation. A leading wake phrase is stripped; otherwise the whole text is the command. Whisper's filler on silence ("Thank you.") is refused. | Lenient gate: "Hey Tawny" prefix optional. | "I only heard …" with the words. |
+| 5. Route | Guardrails first (image, rewrite of a selection, content/code, control grammar), then the CLEF decider for anything addressed to Tawny. | Same; shortcut "open X" without the wake phrase runs only if X exists on the PC, otherwise it is dictation. | Decider unavailable or unsure: dictation (control needs 0.5 confidence, text needs 0.75). |
+| 6. Act | Dictation and results paste into the app that had focus. Control: open (direct), switch (focus, then launch if Windows refuses), click/type via UI Automation; risky steps ask for Enter. | Same. | "I couldn't find X", "X is open but Windows would not bring it forward", or the provider's error. |
+
+Tawny's own windows are never a control target.
+
 ## Audio-to-action flow
 
 ```text
@@ -86,10 +111,11 @@ CLEF calls time out after 15 seconds; text operations and image generation use 4
 ```text
 tawny-wake.exe (Windows speech recognizer, offline)  → hypotheses as text → WakeDetector (cooldown, rate limit)
 engine window (hidden, mic, 16 kHz AudioWorklet)     → CaptureCore: ring buffer, energy VAD, SessionEndpointer
-wake → engine.beginSession → clip (wake phrase + command) → WAV → Groq → splitWakePhrase (strict) → router
+wake → engine.beginSession → clip (command, often with the wake phrase) → WAV → Groq → commandFromWakeTranscript → router
 ```
 
-- The recognizer only suggests a wake; Whisper must confirm that the clip starts with a greeting plus the name, otherwise the job is discarded with no side effects. Clips with almost no speech are never uploaded.
+- The local recognizer's grammar match is the wake confirmation. Whisper used to have to find the phrase again, but people say "Hey Tawny", wait for the orb and then speak, so the clip often starts at the command and valid requests were thrown away. Whisper's filler on near-silence is refused, and silent clips are never uploaded.
+- Neither microphone path uses automatic gain control: Chromium's gain control changes the Windows microphone volume itself, which the shared wake recognizer depends on.
 - The endpointer has three phases: the wake phrase itself, a grace period if only the phrase was said, then the command, which ends after about 1.4 s of silence, on “Tawny send it”, on Esc, or at 60 s.
 - Everything audio-related that does not need a browser lives in `src/shared/audio` and is unit-tested with synthetic audio. The hotkey path still records with `MediaRecorder` and is unchanged.
 - The engine window exists only while hands-free is on, so turning it off releases the microphone. Lock and sleep pause it.
@@ -116,7 +142,11 @@ Electron `safeStorage` is required. Signing out removes the persisted Firebase s
 
 `src/main/logger.ts` keeps a bounded in-memory log and appends JSONL locally. Logs include event names, timing, state, byte/character counts, and sanitized errors; they must not include API credentials, transcripts, or selected text.
 
-Renderer `unresponsive`, `responsive`, and `render-process-gone` events are recorded locally. A renderer process exit triggers at most one reload attempt for the process lifetime. This is renderer recovery, not proof that a main-process crash or OS-level hang has been fixed.
+Renderer `unresponsive`, `responsive`, and `render-process-gone` events are recorded locally for each window, and a crashed window is reloaded once. An unexpected exception or rejection in the main process is logged (`main.exception`, `main.rejection`) and fails the job in progress with a message, instead of Electron's crash dialog.
+
+### Updates
+
+electron-updater downloads a new release in the background. Closing the window only hides Tawny to the tray, so waiting for a real quit meant updates never installed. Now a downloaded update installs about a minute later, as soon as Tawny is idle (or at once from **Restart now**, or on tray **Quit**): the helpers (`tawny-wake`, `tawny-control`, `keywatcher`) and the engine are stopped first so no file is locked, then a silent install starts and relaunches Tawny. Update errors are logged with their cause.
 
 ## Source map
 

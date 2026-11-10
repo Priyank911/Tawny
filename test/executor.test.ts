@@ -251,6 +251,21 @@ describe('opening things', () => {
     expect(shellLog).toEqual([]);
   });
 
+  it('launches an already running app when Windows refuses to bring its window forward', async () => {
+    const world = newWorld({ blockFocus: true, windows: [{ hwnd: '30', pid: 5, title: 'WhatsApp', exe: 'WhatsApp.exe' }] });
+    const launch = { type: 'appid' as const, value: '5319275A.WhatsAppDesktop_cv1g1gvanyjgm!App' };
+    const { executor, shellLog } = setup(world, {}, { kind: 'window', hwnd: '30', display: 'WhatsApp', launch });
+    expect(await executor.run(plan({ verb: 'open', target: 'whatsapp' }))).toEqual({ ok: true, message: 'Opened WhatsApp.' });
+    expect(shellLog).toEqual([`launch ${launch.value}`]);
+  });
+
+  it('says what to do when a running window cannot be focused and there is nothing to launch', async () => {
+    const world = newWorld({ blockFocus: true, windows: [{ hwnd: '30', pid: 5, title: 'Tool', exe: 'tool.exe' }] });
+    const result = await setup(world, {}, { kind: 'window', hwnd: '30', display: 'tool' }).executor.run(plan({ verb: 'open', target: 'tool' }));
+    expect(result.ok).toBe(false);
+    expect(result.message).toContain('taskbar');
+  });
+
   it('reports a clear message when the name cannot be resolved', async () => {
     const result = await setup(newWorld(), {}, { kind: 'none', reason: 'I couldn\'t find “zebra”.' }).executor.run(plan({ verb: 'open', target: 'zebra' }));
     expect(result).toEqual({ ok: false, message: 'I couldn\'t find “zebra”.' });

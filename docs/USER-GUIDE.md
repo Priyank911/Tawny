@@ -49,7 +49,7 @@ Turn on **Settings → Hands-free and voice control → Listen for “Hey Tawny�
 
 Examples: “Hey Tawny, open the Projects folder on D drive.” “Hey Tawny, switch to Chrome.” “Hey Tawny, click the Save button.” “Hey Tawny, scroll down.” “Hey Tawny, write a Python function that reverses a string.”
 
-**Privacy.** The wake phrase is recognised by Windows on this PC. Nothing is uploaded until it is heard; the request is then sent to Groq, which has to confirm it began with “Hey Tawny”, otherwise it is discarded. Turning the switch off releases the microphone. Hands-free pauses while the screen is locked.
+**Privacy.** The wake phrase is recognised by Windows on this PC. Nothing is uploaded until it is heard; then your request is sent to Groq for transcription. Turning the switch off releases the microphone. Hands-free pauses while the screen is locked.
 
 **Voice control safety.** Tawny moves the real cursor (turn this off in Settings for instant, direct opening), stops when you move the mouse or press Esc, and asks for confirmation before closing windows, clicking buttons such as Delete, Send or Pay, or opening links it worked out itself. Confirm with **Enter** or the shortcut, refuse with **Esc**. It never starts a command shell or types into a terminal or an administrator window, and it refuses when several items match a name.
 
@@ -86,7 +86,7 @@ Delete the Tawny/voicerouter application-data folder to clear its local images, 
 2. “No speech recognizer”: add an English speech language in Windows **Settings → Time and language → Speech**.
 3. “No microphone”: allow desktop apps to use the microphone in Windows privacy settings and check the default input device.
 4. Say the phrase clearly, then your request. If it keeps missing, use the shortcut; both paths do the same things. Check **Live log** for `wake.start`, `gate.result` and `job.discarded`.
-5. “I heard … not ‘Hey Tawny’, so I did nothing”: the PC heard the wake phrase but the transcription did not start with it. Pause for a moment after “Hey Tawny”, or say the name clearly. `gate.rejected` in the log shows the opening words that were heard.
+5. “I only heard …”: Whisper's transcript had no request in it (for example only “Thank you.”). Say the request a little louder or closer to the microphone. Tawny never changes your Windows microphone volume; if requests are often missed, raise it to 80-100% in Windows **Settings → System → Sound → Input**.
 
 ### Voice control did nothing or stopped
 
@@ -112,7 +112,7 @@ Open **Live log** in Tawny or read `logs/pipeline.jsonl` inside the application�
 
 ## Updating Tawny
 
-Tawny checks the GitHub early-preview releases. Tawny downloads an update in the background and installs it when it closes. Read the [install notes](./INSTALL-EARLY-PREVIEW.md) for details.
+Tawny checks the GitHub early-preview releases and downloads an update in the background. About a minute after the download finishes, Tawny restarts itself to install it as soon as it is not busy; choose **Restart now** in the update notice to do it at once. Closing the window only hides Tawny to the tray, so you do not need to close it for an update. Read the [install notes](./INSTALL-EARLY-PREVIEW.md) for details.
 
 ## Feedback
 

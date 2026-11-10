@@ -1,5 +1,6 @@
 import { EventEmitter } from 'node:events';
 import type { HandsFreeStatus } from '../../shared/contracts';
+import { describeHelperStartError } from '../native/binaries';
 import { LineProcess, type Spawner } from '../native/lineProcess';
 import { WakeDetector, type WakeDetectorOptions, type WakeSignal } from './wakeDetector';
 
@@ -53,7 +54,7 @@ export class WakeService extends EventEmitter {
     this.maxRestarts = options.maxRestarts ?? 5;
     this.process.on('line', (line: string) => this.onLine(line));
     this.process.on('exit', () => this.onExit());
-    this.process.on('error', (error: Error) => this.fail(`The speech recognizer could not start (${error.message}).`));
+    this.process.on('error', (error: Error) => this.fail(describeHelperStartError('The speech recognizer (tawny-wake.exe)', error)));
   }
 
   get current(): HandsFreeStatus {

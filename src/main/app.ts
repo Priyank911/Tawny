@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { writeFile } from 'node:fs/promises';
 import { createActor } from 'xstate';
 import { pipelineMachine } from './pipeline/machine';
-import { confirmWakePhrase, gateTranscriptDetailed, stripSendPhrase } from './pipeline/gate';
+import { commandFromWakeTranscript, gateTranscriptDetailed } from './pipeline/gate';
 import { heuristicRoute, needsSelectionCapture, reconcileIntent } from './pipeline/router';
 import { captureSelectedText, pasteImage, pasteText } from './inject';
 import { PipelineError, type AuthProfile, type BehaviorSettings, type CaptureSource, type HandsFreeStatus, type HotkeyStatus, type HotkeyTestResult, type OverlaySnapshot, type UpdateNotice } from '../shared/contracts';
@@ -44,6 +44,8 @@ const linuxPasswordStore = linuxPasswordStorePreference(
 if (linuxPasswordStore) app.commandLine.appendSwitch('password-store', linuxPasswordStore);
 
 let mainWindow: BrowserWindow | undefined;
+/** The listening orb and status pill. Separate from the app window (main page, Settings, Live log). */
+let overlayWindow: BrowserWindow | undefined;
 let tray: Tray | undefined;
 let snapshot: OverlaySnapshot = { state: 'idle', elapsedMs: 0, rms: 0 };
 let readyTimer: NodeJS.Timeout | undefined;
@@ -61,7 +63,6 @@ let shortcutRegistered = false;
 let lastHotkeyTimestamp = 0;
 let pendingShortcutTest: { resolve: (result: HotkeyTestResult) => void; timer: NodeJS.Timeout } | undefined;
 let settingsReturnState: { background: boolean; bounds: { x: number; y: number; width: number; height: number }; visible: boolean } | undefined;
-let rendererRecoveryUsed = false;
 let settingsPanelOpen = false;
 let shortcutCaptureMode = false;
 let behavior: BehaviorSettings = DEFAULT_BEHAVIOR;
@@ -91,9 +92,7 @@ if (!hasSingleInstanceLock) {
       else pendingCliTrigger = true;
       return;
     }
-    if (!mainWindow) return;
-    showOverlay();
-    mainWindow.focus();
+    showMainWindow();
   });
 }
 
@@ -192,13 +191,54 @@ async function installUpdateFromNotice(): Promise<void> {
   }
   const updater = await initializeUpdateService();
   if (!updater || !isDownloadedUpdateReady()) throw new Error('The update is not fully downloaded yet. Wait for the download to finish, then try again.');
+  logPipeline({ event: 'update.install.start', message: 'Stopping the helpers and starting the update installer.' });
   quitting = true;
   try {
-    updater.quitAndInstall(false, true);
+    // The installer replaces files in resources/native; a helper that is still running keeps its exe locked
+    // and the install fails. Stop them all and give them a moment to exit before handing over.
+    globalShortcut.unregisterAll();
+    if (handsFreeStatus.state !== 'off') stopHandsFree();
+    engine.stop();
+    control.stop();
+    stopKeyWatcher();
+    await new Promise((resolve) => setTimeout(resolve, 900));
+    // Silent install, then start the new version.
+    updater.quitAndInstall(true, true);
   } catch (error) {
     quitting = false;
+    logPipeline({ level: 'error', event: 'update.install.failure', message: error instanceof Error ? error.message : 'The update installer could not start.' });
     throw error;
   }
+}
+
+/**
+ * A downloaded update installs on its own: closing the window only hides Tawny
+ * to the tray, so waiting for a real quit meant it never installed. After a
+ * minute's notice, the install starts as soon as Tawny is idle (no job, no
+ * hands-free capture, no confirmation, Settings closed).
+ */
+const UPDATE_GRACE_MS = 60_000;
+let updateInstallTimer: NodeJS.Timeout | undefined;
+
+function isIdleForUpdate(): boolean {
+  const free = snapshot.state === 'idle' || snapshot.state === 'done' || snapshot.state === 'failed' || snapshot.state === 'cancelled';
+  return free && !wakeSessionActive && !pendingConfirm && !settingsPanelOpen;
+}
+
+function scheduleUpdateInstall(): void {
+  if (updateInstallTimer) return;
+  const attempt = (): void => {
+    updateInstallTimer = undefined;
+    if (!isDownloadedUpdateReady()) return;
+    if (!isIdleForUpdate()) {
+      updateInstallTimer = setTimeout(attempt, 10_000);
+      return;
+    }
+    void installUpdateFromNotice().catch((error: unknown) => {
+      logPipeline({ level: 'warn', event: 'update.install.failure', message: error instanceof Error ? error.message : 'The update could not be installed.' });
+    });
+  };
+  updateInstallTimer = setTimeout(attempt, UPDATE_GRACE_MS);
 }
 
 function registerGlobalShortcut(accelerator: string): HotkeyStatus {
@@ -257,36 +297,88 @@ function createWindow(): void {
   mainWindow.once('ready-to-show', () => {
     console.log('Tawny main page is ready. Choose Run in background to minimize to the tray.');
   });
-  mainWindow.on('blur', () => {
-    if (backgroundMode && snapshot.state === 'idle') mainWindow?.hide();
-  });
-  mainWindow.on('unresponsive', () => {
-    logPipeline({ level: 'warn', event: 'renderer.unresponsive', message: 'The Tawny window stopped responding; waiting for Electron to recover it.' });
-  });
-  mainWindow.on('responsive', () => {
-    logPipeline({ event: 'renderer.responsive', message: 'The Tawny window is responding again.' });
-  });
-  mainWindow.webContents.on('render-process-gone', (_event, details) => {
-    logPipeline({
-      level: 'error',
-      event: 'renderer.process.gone',
-      message: `The Tawny renderer exited (${details.reason}, code ${details.exitCode}).`,
-      data: { reason: details.reason, exitCode: String(details.exitCode) }
-    });
+  watchRenderer(mainWindow, 'app', () => {
     settingsPanelOpen = false;
     shortcutCaptureMode = false;
     globalShortcut.setSuspended(false);
-    if (rendererRecoveryUsed || quitting) return;
-    rendererRecoveryUsed = true;
-    const windowRef = mainWindow;
+  });
+  loadView(mainWindow, 'main');
+}
+
+/**
+ * The overlay is its own window: the listening orb and status pill live here
+ * and nowhere else. It used to share the app window, which was resized to a
+ * 620x72 strip whenever a job started, so a wake while Settings was open
+ * crushed Settings into the pill. Now each window keeps its own size and job.
+ */
+function createOverlayWindow(): void {
+  overlayWindow = new BrowserWindow({
+    width: OVERLAY_WIDTH,
+    height: OVERLAY_HEIGHT,
+    show: false,
+    frame: false,
+    transparent: true,
+    resizable: false,
+    movable: false,
+    minimizable: false,
+    maximizable: false,
+    fullscreenable: false,
+    focusable: false,
+    skipTaskbar: true,
+    alwaysOnTop: true,
+    hasShadow: false,
+    backgroundColor: '#00000000',
+    webPreferences: {
+      preload: join(__dirname, '../preload/preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      // The shortcut recorder runs in this window while it is hidden between jobs.
+      backgroundThrottling: false
+    }
+  });
+  overlayWindow.setAlwaysOnTop(true, 'screen-saver', 1);
+  overlayWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+  overlayWindow.on('close', (event) => {
+    if (!quitting) {
+      event.preventDefault();
+      overlayWindow?.hide();
+    }
+  });
+  overlayWindow.webContents.on('context-menu', () => showContextMenu());
+  watchRenderer(overlayWindow, 'overlay', () => undefined);
+  loadView(overlayWindow, 'overlay');
+}
+
+function loadView(window: BrowserWindow, view: 'main' | 'overlay'): void {
+  if (process.env.ELECTRON_RENDERER_URL) void window.loadURL(`${process.env.ELECTRON_RENDERER_URL}?view=${view}`);
+  else void window.loadFile(join(__dirname, '../renderer/index.html'), { query: { view } });
+}
+
+/** Logs a hung or crashed renderer and reloads it once, so one bad page never leaves Tawny dead. */
+function watchRenderer(window: BrowserWindow, name: 'app' | 'overlay', onGone: () => void): void {
+  let recovered = false;
+  window.on('unresponsive', () => {
+    logPipeline({ level: 'warn', event: 'renderer.unresponsive', message: `The Tawny ${name} window stopped responding; waiting for it to recover.` });
+  });
+  window.on('responsive', () => {
+    logPipeline({ event: 'renderer.responsive', message: `The Tawny ${name} window is responding again.` });
+  });
+  window.webContents.on('render-process-gone', (_event, details) => {
+    logPipeline({
+      level: 'error',
+      event: 'renderer.process.gone',
+      message: `The Tawny ${name} window exited (${details.reason}, code ${details.exitCode}).`,
+      data: { window: name, reason: details.reason, exitCode: String(details.exitCode) }
+    });
+    onGone();
+    if (recovered || quitting) return;
+    recovered = true;
     setTimeout(() => {
-      if (!windowRef || windowRef.isDestroyed() || windowRef.webContents.isDestroyed() || quitting) return;
-      logPipeline({ level: 'warn', event: 'renderer.recovery', message: 'Reloading Tawny once after a renderer crash.' });
-      windowRef.webContents.reload();
+      if (window.isDestroyed() || window.webContents.isDestroyed() || quitting) return;
+      logPipeline({ level: 'warn', event: 'renderer.recovery', message: `Reloading the Tawny ${name} window after a crash.` });
+      window.webContents.reload();
     }, 800);
   });
-  if (process.env.ELECTRON_RENDERER_URL) mainWindow.loadURL(process.env.ELECTRON_RENDERER_URL);
-  else mainWindow.loadFile(join(__dirname, '../renderer/index.html'));
 }
 
 const OVERLAY_WIDTH = 620;
@@ -294,38 +386,26 @@ const OVERLAY_HEIGHT = 72;
 const OVERLAY_TOP_INSET = 12;
 
 function positionOverlayAtTopCenter(): void {
-  if (!mainWindow) return;
+  if (!overlayWindow || overlayWindow.isDestroyed()) return;
   const { bounds } = screen.getPrimaryDisplay();
   const width = Math.min(OVERLAY_WIDTH, bounds.width);
   const height = Math.min(OVERLAY_HEIGHT, bounds.height);
   const x = Math.round(bounds.x + (bounds.width - width) / 2);
   const y = Math.round(bounds.y + OVERLAY_TOP_INSET);
-  // Set size and position together so a previous main-window center/location
-  // cannot leak into overlay mode during a hotkey transition.
-  mainWindow.setBounds({ x, y, width, height }, false);
+  overlayWindow.setBounds({ x, y, width, height }, false);
 }
 
+/** Shows the listening orb / status pill. Only the overlay window is touched; the app window keeps its page. */
 function showOverlay(): void {
-  if (!mainWindow) return;
+  if (!overlayWindow || overlayWindow.isDestroyed()) return;
   backgroundMode = true;
-  sendToRenderer('app:background-mode');
-  mainWindow.setSkipTaskbar(true);
-  mainWindow.setResizable(false);
-  mainWindow.setSize(OVERLAY_WIDTH, OVERLAY_HEIGHT);
-  mainWindow.setFocusable(false);
-  // Ensure window is always on top and in front of all open applications
-  mainWindow.setAlwaysOnTop(true, 'screen-saver', 1);
-  mainWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
-  // Show maps the window; showInactive is unsupported on Wayland. Keep it
-  // non-focusable so the previously focused editor remains the paste target.
-  mainWindow.show();
-  mainWindow.moveTop();
-  // Windows may restore the prior hidden-window position while showing it;
-  // apply the fixed anchor once more after the native window is visible.
   positionOverlayAtTopCenter();
-
+  // Non-focusable, so the app the person was typing in stays the paste target.
+  overlayWindow.showInactive();
+  overlayWindow.moveTop();
+  positionOverlayAtTopCenter();
   try {
-    const handle = mainWindow.getNativeWindowHandle();
+    const handle = overlayWindow.getNativeWindowHandle();
     const hwnd = process.arch === 'x64' ? handle.readBigInt64LE(0) : handle.readInt32LE(0);
     makeWindowTopmost(hwnd);
   } catch (err) {
@@ -333,43 +413,35 @@ function showOverlay(): void {
   }
 }
 
+function hideOverlay(): void {
+  if (overlayWindow && !overlayWindow.isDestroyed()) overlayWindow.hide();
+}
+
+/** "Run in background": the app window goes away; the overlay appears only while Tawny works. */
 function enterBackground(): void {
   backgroundMode = true;
-  if (!mainWindow) return;
-  mainWindow.setSkipTaskbar(true);
-  mainWindow.setResizable(false);
-  mainWindow.setSize(OVERLAY_WIDTH, OVERLAY_HEIGHT);
-  mainWindow.setFocusable(false);
-  mainWindow.setAlwaysOnTop(true, 'screen-saver', 1);
-  mainWindow.hide();
+  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.hide();
+}
+
+/** Brings the app window forward with its main page. */
+function showMainWindow(): void {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  if (mainWindow.isMinimized()) mainWindow.restore();
+  mainWindow.setSkipTaskbar(false);
+  mainWindow.show();
+  mainWindow.focus();
 }
 
 function openSettings(): void {
-  if (!mainWindow) return;
-  if (settingsPanelOpen) {
-    mainWindow.show();
-    mainWindow.focus();
-    return;
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  const wasVisible = mainWindow.isVisible();
+  if (!settingsPanelOpen) {
+    shortcutCaptureMode = false;
+    globalShortcut.setSuspended(false);
+    settingsPanelOpen = true;
+    settingsReturnState = { background: !wasVisible, bounds: mainWindow.getBounds(), visible: wasVisible };
   }
-  shortcutCaptureMode = false;
-  globalShortcut.setSuspended(false);
-  settingsPanelOpen = true;
-  settingsReturnState = {
-    background: backgroundMode,
-    bounds: mainWindow.getBounds(),
-    visible: mainWindow.isVisible()
-  };
-  const display = screen.getDisplayMatching(mainWindow.getBounds());
-  const width = Math.min(760, display.workAreaSize.width);
-  const height = Math.min(680, display.workAreaSize.height);
-  backgroundMode = false;
-  mainWindow.setSkipTaskbar(false);
-  mainWindow.setResizable(true);
-  mainWindow.setSize(width, height);
-  mainWindow.setFocusable(true);
-  mainWindow.setAlwaysOnTop(false);
-  mainWindow.center();
-  mainWindow.show();
+  showMainWindow();
   sendToRenderer('settings:open');
 }
 
@@ -385,29 +457,12 @@ function closeSettingsWindow(): void {
     clearTimeout(test.timer);
     test.resolve({ success: false, message: 'Shortcut test ended because Settings was closed.' });
   }
-  if (!mainWindow || !previous) return;
-  if (previous.background) {
-    enterBackground();
-    return;
-  }
-  mainWindow.setBounds(previous.bounds);
-  mainWindow.setSkipTaskbar(false);
-  mainWindow.setFocusable(true);
-  mainWindow.setAlwaysOnTop(false);
-  if (previous.visible) mainWindow.show();
-  else mainWindow.hide();
+  // Settings opened from the tray while Tawny ran in the background: go back to the background.
+  if (previous && !previous.visible) enterBackground();
 }
 
 function openLogs(): void {
-  if (!mainWindow) return;
-  backgroundMode = false;
-  mainWindow.setSkipTaskbar(false);
-  mainWindow.setResizable(false);
-  mainWindow.setSize(760, 560);
-  mainWindow.setFocusable(true);
-  mainWindow.setAlwaysOnTop(false);
-  mainWindow.center();
-  mainWindow.show();
+  showMainWindow();
   sendToRenderer('logs:open');
 }
 
@@ -462,12 +517,12 @@ function createTray(): void {
   tray.setToolTip('Tawny');
   tray.setContextMenu(Menu.buildFromTemplate([
     {
-      label: 'Show Tawny',
-      click: showOverlay
+      label: 'Open Tawny',
+      click: showMainWindow
     },
     {
       label: 'Hide overlay',
-      click: () => mainWindow?.hide()
+      click: hideOverlay
     },
     {
       label: 'Settings',
@@ -481,12 +536,17 @@ function createTray(): void {
     {
       label: 'Quit Tawny',
       click: () => {
+        // With an update waiting, quitting installs it the safe way (helpers stopped first).
+        if (isDownloadedUpdateReady()) {
+          void installUpdateFromNotice().catch(() => { quitting = true; app.quit(); });
+          return;
+        }
         quitting = true;
         app.quit();
       }
     }
   ]));
-  tray.on('click', showOverlay);
+  tray.on('click', showMainWindow);
 }
 
 const actor = createActor(pipelineMachine);
@@ -496,8 +556,11 @@ const actor = createActor(pipelineMachine);
  * their final status updates must not throw "Object has been destroyed".
  */
 function sendToRenderer(channel: string, ...args: unknown[]): void {
-  if (!mainWindow || mainWindow.isDestroyed() || mainWindow.webContents.isDestroyed()) return;
-  mainWindow.webContents.send(channel, ...args);
+  // Both windows load the same renderer; each view acts only on the messages that concern it.
+  for (const window of [mainWindow, overlayWindow]) {
+    if (!window || window.isDestroyed() || window.webContents.isDestroyed()) continue;
+    window.webContents.send(channel, ...args);
+  }
 }
 
 setLogSink((entry) => sendToRenderer('pipeline:log', entry));
@@ -533,16 +596,35 @@ actor.subscribe((state) => {
   }
   applyClickThrough();
   sendToRenderer('overlay:update', snapshot);
-  if (state.value === 'idle' && backgroundMode && mainWindow?.isVisible()) {
-    const windowRef = mainWindow;
+  // The overlay is only for work in progress and its result; it leaves once Tawny is idle again.
+  if (state.value === 'idle' && overlayWindow?.isVisible()) {
     setTimeout(() => {
-      if (!backgroundMode || snapshot.state !== 'idle' || !windowRef.isVisible()) return;
-      if (windowRef.getSize()[1] !== OVERLAY_HEIGHT) windowRef.setSize(OVERLAY_WIDTH, OVERLAY_HEIGHT);
-      windowRef.hide();
+      if (snapshot.state === 'idle') hideOverlay();
     }, 450);
   }
 });
 actor.start();
+
+/**
+ * Last line of defence. An unexpected exception in the main process is logged
+ * and fails the job in progress with a message in the pill, instead of
+ * Electron's crash dialog or a pill that stays on "Working" forever.
+ */
+function handleUnexpectedError(kind: 'exception' | 'rejection', error: unknown): void {
+  const message = error instanceof Error ? error.message : String(error);
+  logPipeline({ level: 'error', event: `main.${kind}`, message: `Unexpected ${kind} in Tawny: ${message.slice(0, 300)}`, ...(activeJobId ? { jobId: activeJobId } : {}) });
+  if (quitting) return;
+  const state = snapshot.state;
+  if (state !== 'idle' && state !== 'done' && state !== 'failed' && state !== 'cancelled') {
+    try {
+      actor.send({ type: 'FAIL', message: 'Something went wrong inside Tawny. Try again; details are in the Live log.' });
+    } catch {
+      // The pipeline itself is broken; the log entry above is what remains.
+    }
+  }
+}
+process.on('uncaughtException', (error) => handleUnexpectedError('exception', error));
+process.on('unhandledRejection', (reason) => handleUnexpectedError('rejection', reason));
 
 function showContextMenu(): void {
   const menu = Menu.buildFromTemplate([
@@ -555,7 +637,7 @@ function showContextMenu(): void {
       click: () => snapshot.state === 'recording' ? stopRecording() : actor.send({ type: 'CANCEL' })
     }
   ]);
-  menu.popup({ window: mainWindow });
+  menu.popup(overlayWindow && !overlayWindow.isDestroyed() ? { window: overlayWindow } : {});
 }
 
 function handlePipelineEvent(event: 'HOTKEY' | 'STOP' | 'CANCEL' | 'CONFIRM'): void {
@@ -727,7 +809,7 @@ function applyClickThrough(): void {
   const wanted = wakeOrb || driving;
   if (wanted === clickThrough) return;
   clickThrough = wanted;
-  mainWindow?.setIgnoreMouseEvents(wanted, { forward: false });
+  if (overlayWindow && !overlayWindow.isDestroyed()) overlayWindow.setIgnoreMouseEvents(wanted, { forward: false });
 }
 
 ipcMain.on('confirm:respond', (_event, approved: unknown) => {
@@ -848,29 +930,24 @@ async function processAudio(segments: Uint8Array[], options: ProcessOptions): Pr
     sendToRenderer('overlay:update', snapshot);
 
     actor.send({ type: 'STAGE', stage: 'gating' });
-    // Hands-free clips must open with a real wake phrase: the local recognizer only suggests a wake, this check confirms it.
-    const spoken = wakeSource ? stripSendPhrase(transcript).text : transcript;
-    const gate = wakeSource
-      ? (() => {
-        const split = confirmWakePhrase(spoken);
-        return { routed: split.routed, text: split.command, original: split.original };
-      })()
+    // Hands-free: the local recognizer already heard "Hey Tawny", so Whisper's text is the command (with the
+    // phrase removed if Whisper heard it too). Shortcut: the lenient gate decides whether the speech was addressed.
+    const wakeCommand = wakeSource ? commandFromWakeTranscript(transcript) : undefined;
+    const gate = wakeCommand
+      ? { routed: true, text: wakeCommand.text, original: wakeCommand.original }
       : gateTranscriptDetailed(transcript);
+    const heard = transcript.split(/\s+/).slice(0, 10).join(' ');
     logPipeline({
       event: 'gate.result',
-      message: gate.routed ? 'Wake phrase accepted.' : 'Wake phrase not detected.',
+      message: wakeCommand ? (wakeCommand.ok ? 'Hands-free request received.' : 'Nothing usable was said after the wake phrase.') : gate.routed ? 'Wake phrase accepted.' : 'Wake phrase not detected.',
       jobId: activeJobId,
       stage: 'gate',
-      data: { routed: String(gate.routed), commandLength: String(gate.text.length), source: options.source }
+      data: { routed: String(gate.routed), commandLength: String(gate.text.length), source: options.source, heard, ...(wakeCommand ? { heardWakePhrase: String(wakeCommand.heardWakePhrase) } : {}) }
     });
-    if (wakeSource && (!gate.routed || !gate.text)) {
-      // The orb was already showing, so say what happened instead of vanishing. The local log keeps the
-      // opening words so wake accuracy can be tuned; nothing beyond what the overlay showed is recorded.
-      const heardStart = transcript.split(/\s+/).slice(0, 6).join(' ');
-      logPipeline({ event: 'gate.rejected', message: 'Whisper did not confirm the wake phrase.', jobId: activeJobId, stage: 'gate', data: { heardStart, routed: String(gate.routed) } });
-      const message = gate.routed
-        ? 'I heard “Hey Tawny” but no request. Say it again with what you need.'
-        : `I heard “${heardStart}${transcript.split(/\s+/).length > 6 ? '…' : ''}”, not “Hey Tawny”, so I did nothing.`;
+    if (wakeCommand && !wakeCommand.ok) {
+      const message = gate.text
+        ? `I only heard “${heard}”. Say “Hey Tawny”, then your request.`
+        : 'I heard “Hey Tawny” but no request. Say it again with what you need.';
       logPipeline({ event: 'job.discarded', message, jobId: activeJobId, stage: 'gate' });
       snapshot = { ...snapshot, message };
       actor.send({ type: 'FAIL', message });
@@ -1080,7 +1157,7 @@ function publishHandsFree(status: HandsFreeStatus): void {
 }
 
 function startWakeSession(): void {
-  if (!authProfile || !behavior.handsFree || !mainWindow) return;
+  if (!authProfile || !behavior.handsFree || !overlayWindow) return;
   const free = snapshot.state === 'idle' || snapshot.state === 'done' || snapshot.state === 'failed';
   if (!free || wakeSessionActive || pendingConfirm || settingsPanelOpen) {
     logPipeline({ event: 'wake.ignored', message: 'A wake phrase was heard while Tawny was busy; ignored.', data: { state: snapshot.state } });
@@ -1270,6 +1347,7 @@ ipcMain.handle('handsfree:get', () => handsFreeStatus);
 
 onUpdateAvailable((notice: UpdateNotice) => {
   sendToRenderer('updates:state', notice);
+  if (notice.state === 'ready') scheduleUpdateInstall();
   if (notice.state === 'downloading' || notice.state === 'error') return;
   const notificationKey = `${notice.state}:${notice.version ?? 'latest'}`;
   if (updateNotificationsShown.has(notificationKey)) return;
@@ -1293,7 +1371,7 @@ setAuthSessionInvalidatedHandler(() => {
 
 app.whenReady().then(async () => {
   screen.on('display-metrics-changed', () => {
-    if (backgroundMode && mainWindow?.isVisible()) positionOverlayAtTopCenter();
+    if (overlayWindow?.isVisible()) positionOverlayAtTopCenter();
   });
   if (process.platform === 'win32') app.setAppUserModelId('com.tawny.desktop');
   authProfile = await getAuthProfile();
@@ -1313,7 +1391,7 @@ app.whenReady().then(async () => {
   });
   session.defaultSession.setPermissionCheckHandler((_webContents, permission) => permission === 'media');
   createWindow();
-  mainWindow?.webContents.on('context-menu', () => showContextMenu());
+  createOverlayWindow();
   createTray();
   activeShortcut = await readGlobalShortcut();
   registerGlobalShortcut(activeShortcut);

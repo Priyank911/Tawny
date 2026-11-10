@@ -121,16 +121,19 @@ export async function initializeUpdateService(): Promise<AppUpdater | undefined>
   });
   autoUpdater.on('update-downloaded', (info) => {
     downloadedUpdateReady = true;
-    logPipeline({ event: 'update.downloaded', message: `Early preview ${info.version} downloaded and will install when Tawny closes.` });
-    emit({ state: 'ready', version: info.version, message: `Early preview ${info.version} is ready. Close Tawny to install it.` });
+    logPipeline({ event: 'update.downloaded', message: `Early preview ${info.version} downloaded; Tawny will restart to install it when it is idle.` });
+    emit({ state: 'ready', version: info.version, message: `Tawny ${info.version} is ready. Tawny restarts to install it in about a minute, or choose Restart now.` });
   });
   autoUpdater.on('update-not-available', () => {
     downloadedUpdateReady = false;
     logPipeline({ event: 'update.current', message: 'Tawny is using the latest early-preview release.' });
   });
-  autoUpdater.on('error', () => {
+  autoUpdater.on('error', (error: Error) => {
     downloadedUpdateReady = false;
-    logPipeline({ level: 'warn', event: 'update.check.failure', message: 'The automatic update could not be completed.' });
+    // The cause is what makes an update failure fixable (offline, GitHub rate limit, a blocked download).
+    const detail = (error?.message ?? 'unknown error').split(/\r?\n/)[0].slice(0, 240);
+    logPipeline({ level: 'warn', event: 'update.check.failure', message: `The automatic update could not be completed: ${detail}` });
+    emit({ state: 'error', message: 'The update could not be downloaded. Tawny will try again later.' });
   });
 
   try {

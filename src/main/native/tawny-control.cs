@@ -456,17 +456,28 @@ namespace Tawny
             {
                 if (attached) Native.AttachThreadInput(thisThread, currentThread, false);
             }
-            bool foreground = false;
-            for (int i = 0; i < 12; i++)
+            bool foreground = WaitForeground(hwnd, 12);
+            if (!foreground)
             {
-                if (Native.GetForegroundWindow() == hwnd)
-                {
-                    foreground = true;
-                    break;
-                }
-                Thread.Sleep(25);
+                // Windows' focus-stealing rules sometimes refuse SetForegroundWindow outright. Minimizing and
+                // restoring the window is a user-visible activation the shell always honours.
+                Native.ShowWindow(hwnd, Native.SW_MINIMIZE);
+                Thread.Sleep(60);
+                Native.ShowWindow(hwnd, Native.SW_RESTORE);
+                Native.SetForegroundWindow(hwnd);
+                foreground = WaitForeground(hwnd, 16);
             }
             return ",\"foreground\":" + Json.Bool(foreground);
+        }
+
+        private static bool WaitForeground(IntPtr hwnd, int attempts)
+        {
+            for (int i = 0; i < attempts; i++)
+            {
+                if (Native.GetForegroundWindow() == hwnd) return true;
+                Thread.Sleep(25);
+            }
+            return false;
         }
 
         private static string CmdWindowState(string state, string hwndText)

@@ -27,6 +27,14 @@ function acceleratorFromKeyEvent(event: ReactKeyboardEvent<HTMLButtonElement>): 
   return normalizedKey && modifiers.length ? [...modifiers, normalizedKey].join('+') : undefined;
 }
 
+/**
+ * Two windows load this page: the app window (?view=main: main page, Settings,
+ * Live log) and the overlay window (?view=overlay: listening orb and status
+ * pill, plus the shortcut recorder). Each renders only its own part.
+ */
+const VIEW: 'main' | 'overlay' = new URLSearchParams(window.location.search).get('view') === 'overlay' ? 'overlay' : 'main';
+const IS_OVERLAY = VIEW === 'overlay';
+
 function App(): ReactElement {
   const [snapshot, setSnapshot] = useState<OverlaySnapshot>({ state: 'idle', elapsedMs: 0, rms: 0 });
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -34,7 +42,6 @@ function App(): ReactElement {
     groqApiKey: '', cloudflareAccountId: '', cloudflareApiToken: ''
   });
   const [saved, setSaved] = useState(false);
-  const [mainPage, setMainPage] = useState(true);
   const [logsOpen, setLogsOpen] = useState(false);
   const [logs, setLogs] = useState<PipelineLog[]>([]);
   const [authProfile, setAuthProfile] = useState<AuthProfile | undefined>(undefined);
@@ -104,13 +111,12 @@ function App(): ReactElement {
       setHotkeyDraft(status.accelerator);
     }).catch(() => undefined);
     const unsubscribeSnapshot = window.voiceRouter.subscribe(setSnapshot);
-    const unsubscribeSettings = window.voiceRouter.onOpenSettings(openSettingsPanel);
-    const unsubscribeOpenLogs = window.voiceRouter.onOpenLogs(() => setLogsOpen(true));
-    const unsubscribeBackground = window.voiceRouter.onBackgroundMode(() => setMainPage(false));
+    // Settings and the Live log belong to the app window only; the overlay must never claim Settings is open.
+    const unsubscribeSettings = IS_OVERLAY ? () => undefined : window.voiceRouter.onOpenSettings(openSettingsPanel);
+    const unsubscribeOpenLogs = IS_OVERLAY ? () => undefined : window.voiceRouter.onOpenLogs(() => setLogsOpen(true));
     const unsubscribeAuth = window.voiceRouter.onAuthProfile(setAuthProfile);
     const unsubscribeAuthRequired = window.voiceRouter.onAuthRequired(() => {
       setAuthProfile(undefined);
-      setMainPage(true);
       setAuthError('Sign in with Google to continue using Tawny.');
     });
     const unsubscribeUpdate = window.voiceRouter.onUpdateState(setUpdateNotice);
@@ -122,7 +128,6 @@ function App(): ReactElement {
       unsubscribeSnapshot();
       unsubscribeSettings();
       unsubscribeOpenLogs();
-      unsubscribeBackground();
       unsubscribeAuth();
       unsubscribeAuthRequired();
       unsubscribeUpdate();
@@ -147,7 +152,7 @@ function App(): ReactElement {
     }).catch(() => undefined);
   }, [settingsOpen]);
   useEffect(() => {
-    if (state !== 'arming' || snapshot.source === 'wake' || recorderRef.current || capturePendingRef.current) return undefined;
+    if (!IS_OVERLAY || state !== 'arming' || snapshot.source === 'wake' || recorderRef.current || capturePendingRef.current) return undefined;
     const capture = async (): Promise<void> => {
       finalizedRef.current = false;
       cancelledCaptureRef.current = false;
@@ -209,7 +214,7 @@ function App(): ReactElement {
     return undefined;
   }, [state]);
   useEffect(() => {
-    if (state !== 'finalizing' || snapshot.source === 'wake') return undefined;
+    if (!IS_OVERLAY || state !== 'finalizing' || snapshot.source === 'wake') return undefined;
     stopRequestedRef.current = true;
     if (!recorderRef.current) {
       window.voiceRouter.logCapture({ event: 'capture.stop.pending', message: 'Waiting for microphone permission before finalizing.' });
@@ -221,7 +226,7 @@ function App(): ReactElement {
     return undefined;
   }, [state]);
   useEffect(() => {
-    if (state !== 'cancelled' || snapshot.source === 'wake') return undefined;
+    if (!IS_OVERLAY || state !== 'cancelled' || snapshot.source === 'wake') return undefined;
     cancelledCaptureRef.current = true;
     stopRequestedRef.current = true;
     rotatingRef.current = false;
@@ -435,12 +440,11 @@ function App(): ReactElement {
   async function handleSignOut(): Promise<void> {
     await window.voiceRouter?.signOut();
     setAccountMenuOpen(false);
-    setMainPage(true);
   }
 
   return (
-    <main className={`app-shell state-${state} ${mainPage ? 'main-page' : 'overlay-page'}`}>
-      {mainPage ? (
+    <main className={`app-shell state-${state} ${IS_OVERLAY ? 'overlay-page' : 'main-page'}`}>
+      {!IS_OVERLAY ? (
         <>
           <header className="topbar">
             <div className="brand">
@@ -460,7 +464,7 @@ function App(): ReactElement {
               <h1>Speak naturally.<br /><em>Work precisely.</em></h1>
               <p>Tawny listens for your shortcut, understands what you mean, and returns the result to the app already in focus.</p>
               {authProfile ? <div className="welcome-actions">
-                <button className="launch-button" onClick={() => { setMainPage(false); void window.voiceRouter?.enterBackground(); }}>
+                <button className="launch-button" onClick={() => void window.voiceRouter?.enterBackground()}>
                   Run in background <KeyboardIcon />
                 </button>
                 <button className="secondary-button" onClick={openSettingsPanel}>
@@ -507,7 +511,7 @@ function App(): ReactElement {
           {updateNotice && <aside className={`update-notice update-${updateNotice.state}`} role="status">
             <div className="update-notice-icon"><Download size={15} /></div>
             <div className="update-notice-copy"><strong>{updateNotice.state === 'ready' ? 'Update ready' : updateNotice.state === 'error' ? 'Update check' : 'Early preview update'}</strong><span>{updateNotice.message}</span></div>
-            {(updateNotice.state === 'manual' || updateNotice.state === 'ready') && <button className="update-action" disabled={installingUpdate} onClick={() => void (updateNotice.state === 'ready' ? installUpdate() : window.voiceRouter?.openReleasePage())}>{updateNotice.state === 'ready' ? installingUpdate ? 'Restarting…' : 'Restart to update' : 'View release'}</button>}
+            {(updateNotice.state === 'manual' || updateNotice.state === 'ready') && <button className="update-action" disabled={installingUpdate} onClick={() => void (updateNotice.state === 'ready' ? installUpdate() : window.voiceRouter?.openReleasePage())}>{updateNotice.state === 'ready' ? installingUpdate ? 'Restarting…' : 'Restart now' : 'View release'}</button>}
             <button className="update-dismiss" aria-label="Dismiss update notice" onClick={() => setUpdateNotice(undefined)}><X size={14} /></button>
           </aside>}
         </>
