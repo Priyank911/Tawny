@@ -64,7 +64,7 @@ Long recordings are divided into one-minute audio segments for transcription. Se
 
 Turn on **Settings → Hands-free and voice control** and say **“Hey Tawny”** followed by your request. A small orb appears while Tawny listens, and the request ends when you stop talking or say **“Tawny send it”**. The same requests work from the shortcut; hands-free only removes the key press.
 
-- **How the wake phrase works.** The Windows speech recognizer on your PC listens for the phrase. Audio is not uploaded until it hears it; then the captured request is sent to Groq, which must confirm that it really began with “Hey Tawny” before anything runs. Anything else is discarded.
+- **How the wake phrase works.** The Windows speech recognizer on your PC listens for the phrase. Audio is not uploaded until it hears it; then the captured request is sent to Groq for transcription. You can pause after “Hey Tawny” and wait for the orb; the PC already heard the phrase.
 - **What voice control can do.** Open drives, folders, files, apps and websites; switch windows; click a named button or item; type; press keys; scroll; minimize, maximize or close the front window. Tawny uses the fastest reliable method (direct open, then Windows UI Automation), shows the cursor moving by default, and stops the moment you move the mouse or press Escape.
 - **What it will not do.** It never starts a command shell, never types into a terminal or an administrator window, and asks you to confirm anything that deletes, sends, closes, or opens a link it planned itself. Ambiguous names are refused rather than guessed.
 - **Screenshots are opt-in.** If an app cannot be read through UI Automation, Tawny can send a screenshot to Cloudflare to find the control. This is off by default.

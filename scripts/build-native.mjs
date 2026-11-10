@@ -72,11 +72,26 @@ if (process.argv.includes('--no-run')) process.exit(0);
 
 // Smoke test: the control helper must answer its basic read-only commands.
 const requests = ['1\thello', '2\tdrives', '3\twindows', '4\tcursor', 'exit'].join('\n') + '\n';
-const run = spawnSync(join(outDir, 'tawny-control.exe'), [], { input: requests, encoding: 'utf8', timeout: 20000 });
-const replies = (run.stdout ?? '').split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line));
-const failed = [1, 2, 3, 4].filter((id) => replies.find((reply) => reply.id === id)?.ok !== true);
+// A freshly compiled exe can be locked for a moment by antivirus scanning, so a failure to start is retried.
+let run;
+let failed = [];
+for (let attempt = 1; attempt <= 4; attempt += 1) {
+  run = spawnSync(join(outDir, 'tawny-control.exe'), [], { input: requests, encoding: 'utf8', timeout: 20000 });
+  const replies = (run.stdout ?? '').split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line));
+  failed = [1, 2, 3, 4].filter((id) => replies.find((reply) => reply.id === id)?.ok !== true);
+  if ((run.status === 0 && failed.length === 0) || !run.error) break;
+  await new Promise((resolve) => setTimeout(resolve, 1500));
+}
+// Windows Smart App Control / WDAC refuses to start unsigned binaries it has no reputation for, and every
+// rebuild is a new binary. That is a property of this PC, not a broken helper: warn and continue. CI has no
+// Smart App Control, so the release workflow always runs the full smoke test.
+const blockedByPolicy = run.error && ['UNKNOWN', 'EACCES', 'EPERM'].includes(run.error.code);
+if (blockedByPolicy && !process.env.CI) {
+  console.warn(`build-native: WARNING: Windows blocked running the freshly built helper (${run.error.code}), most likely Smart App Control. Skipping the local smoke test; CI runs it before every release.`);
+  process.exit(0);
+}
 if (run.status !== 0 || failed.length > 0) {
-  console.error(`build-native: smoke test failed for request ids ${failed.join(', ') || '(process error)'}.\n${run.stdout}\n${run.stderr}`);
+  console.error(`build-native: smoke test failed for request ids ${failed.join(', ') || '(process error)'}.\n${run.error ? `start error: ${run.error.message}\n` : ''}${run.stdout ?? ''}\n${run.stderr ?? ''}`);
   process.exit(1);
 }
 console.log('build-native: tawny-control.exe smoke test passed (hello, drives, windows, cursor).');

@@ -1,3 +1,4 @@
+import { describeHelperStartError } from '../native/binaries';
 import { LineProcess, type Spawner } from '../native/lineProcess';
 
 /**
@@ -95,7 +96,7 @@ export class ControlHelper {
     this.clearTimer = options.clearTimer ?? ((handle) => clearTimeout(handle as NodeJS.Timeout));
     this.process.on('line', (line: string) => this.onLine(line));
     this.process.on('exit', () => this.failAll(new HelperError('helper_exited', 'The computer-control helper stopped.')));
-    this.process.on('error', (error: Error) => this.failAll(new HelperError('helper_unavailable', `The computer-control helper could not start (${error.message}).`)));
+    this.process.on('error', (error: Error) => this.failAll(new HelperError('helper_unavailable', describeHelperStartError('The computer-control helper (tawny-control.exe)', error))));
   }
 
   /** Starts the process on first use and checks it answers. */

@@ -43,7 +43,8 @@ export type Resolution =
   | { kind: 'thispc'; display: string }
   | { kind: 'special'; shell: string; display: string }
   | { kind: 'app'; launch: LaunchTarget; display: string }
-  | { kind: 'window'; hwnd: string; display: string }
+  /** A running window to bring forward; `launch` starts the app instead if Windows refuses to focus it. */
+  | { kind: 'window'; hwnd: string; display: string; launch?: LaunchTarget }
   | { kind: 'url'; url: string; display: string }
   | { kind: 'none'; reason: string };
 
@@ -170,14 +171,15 @@ export class TargetResolver {
     const ranked = rankMatches(target, windows, (window) => window.exe.replace(/\.exe$/i, ''), 0.85);
     const byExe = pickConfident(ranked, { minimum: 0.85, margin: 0.04 });
     if (byExe.best && !byExe.ambiguous) {
-      return { kind: 'window', hwnd: byExe.best.item.hwnd, display: byExe.best.item.exe.replace(/\.exe$/i, '') };
+      const installed = pickConfident(this.deps.apps.find(target), { minimum: 0.8, margin: 0.04 }).best?.item;
+      return { kind: 'window', hwnd: byExe.best.item.hwnd, display: byExe.best.item.exe.replace(/\.exe$/i, ''), ...(installed ? { launch: installed.launch } : {}) };
     }
     const apps = this.deps.apps.find(target);
     const pick = pickConfident(apps, { minimum: 0.8, margin: 0.04 });
     if (pick.best) {
       const entry: AppEntry = pick.best.item;
       const running = windows.find((window) => scoreMatch(window.exe.replace(/\.exe$/i, ''), entry.name) >= 0.85);
-      if (running) return { kind: 'window', hwnd: running.hwnd, display: entry.name };
+      if (running) return { kind: 'window', hwnd: running.hwnd, display: entry.name, launch: entry.launch };
       return { kind: 'app', launch: entry.launch, display: entry.name };
     }
     return undefined;

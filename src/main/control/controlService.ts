@@ -16,6 +16,11 @@ import type { PlannerContext } from './planner';
 import { TargetResolver, type DriveLike, type KnownFolderKey } from './resolver';
 import { CloudflareVision } from './vision';
 
+/** Tawny's own overlay and app windows are never a target ("switch to Tawny" focused the overlay). */
+function isOwnWindow(window: { pid?: number; exe?: string }): boolean {
+  return window.pid === process.pid || /^tawny(?:\.exe)?$/i.test(window.exe ?? '');
+}
+
 /**
  * Owns the Windows control helper and the name indexes, and runs plans.
  * Everything here is created lazily on first use so a person who never uses
@@ -198,8 +203,8 @@ export class ControlService {
       this.drives().catch(() => [] as DriveLike[])
     ]);
     return {
-      ...(foreground ? { foreground: { title: foreground.title, exe: foreground.exe } } : {}),
-      windows: windows.map((window) => ({ title: window.title, exe: window.exe })),
+      ...(foreground && !isOwnWindow(foreground) ? { foreground: { title: foreground.title, exe: foreground.exe } } : {}),
+      windows: windows.filter((window) => !isOwnWindow(window)).map((window) => ({ title: window.title, exe: window.exe })),
       drives: drives.filter((drive) => drive.ready).map((drive) => ({ letter: drive.letter, label: drive.label }))
     };
   }
@@ -208,7 +213,7 @@ export class ControlService {
     return new TargetResolver({
       knownFolders: () => this.knownFolders(),
       drives: () => this.drives(),
-      windows: async () => (await helper.windows()).map((window) => ({ hwnd: window.hwnd, title: window.title, exe: window.exe })),
+      windows: async () => (await helper.windows()).filter((window) => !isOwnWindow(window)).map((window) => ({ hwnd: window.hwnd, title: window.title, exe: window.exe })),
       apps: this.apps,
       paths: this.paths,
       indexRoots: () => this.indexRoots(),

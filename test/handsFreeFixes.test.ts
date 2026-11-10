@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { AppIndex, entriesFromStartApps } from '../src/main/control/appIndex';
 import { parseControlCommand } from '../src/main/pipeline/controlGrammar';
-import { confirmWakePhrase, splitWakePhrase } from '../src/main/pipeline/gate';
+import { commandFromWakeTranscript, confirmWakePhrase, splitWakePhrase } from '../src/main/pipeline/gate';
 import { isImageGenerationRequest } from '../src/main/pipeline/intent';
 import { CONTROL_MIN_CONFIDENCE, heuristicRoute, reconcileIntent, type RouteInput } from '../src/main/pipeline/router';
 
@@ -106,5 +106,24 @@ describe('Microsoft Store apps', () => {
     const index = new AppIndex();
     index.setShortcuts(['C:\\ProgramData\\Microsoft\\Windows\\Start Menu\\Programs\\Spotify.lnk'], startApps);
     expect(index.find('spotify')[0].item.launch.type).toBe('file');
+  });
+});
+
+describe('the command of a hands-free request (the local wake is the confirmation)', () => {
+  it.each([
+    // The person said "Hey Tawny", waited for the orb, then spoke: the clip holds only the command.
+    ['Open this PC.', 'Open this PC.', false],
+    ['Can you open D Drive?', 'Can you open D Drive?', false],
+    // Whisper heard the wake phrase too: it is removed.
+    ['Hey Tawny, open WhatsApp.', 'open WhatsApp.', true],
+    ['Hey, Tawny. Generate an image of a sunset.', 'Generate an image of a sunset.', true],
+    ['Tawny, open the recycle bin. Tawny send it.', 'open the recycle bin.', true]
+  ])('%j -> %j', (transcript, original, heardWakePhrase) => {
+    const result = commandFromWakeTranscript(transcript);
+    expect(result).toMatchObject({ ok: true, original, heardWakePhrase });
+  });
+
+  it.each(['Thank you.', 'Here you go.', 'Hey Tawny.', '', '  ', 'Thanks for watching!', 'Tawny'])('%j is not a request', (transcript) => {
+    expect(commandFromWakeTranscript(transcript).ok).toBe(false);
   });
 });

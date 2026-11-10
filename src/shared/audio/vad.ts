@@ -23,7 +23,10 @@ export interface VadOptions {
   ratio: number;
 }
 
-export const DEFAULT_VAD_OPTIONS: VadOptions = { onsetFrames: 3, hangoverMs: 240, minRms: 0.012, ratio: 3 };
+// minRms is low because Tawny no longer lets gain control raise the microphone level: on a laptop at 39%
+// volume, speech peaks around 0.012-0.018 RMS, which a 0.012 floor almost never saw. The adaptive
+// noise-floor ratio still keeps steady room noise unvoiced.
+export const DEFAULT_VAD_OPTIONS: VadOptions = { onsetFrames: 3, hangoverMs: 240, minRms: 0.005, ratio: 3 };
 
 export function frameRms(frame: Int16Array | Float32Array): number {
   if (frame.length === 0) return 0;
