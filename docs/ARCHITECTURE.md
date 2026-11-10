@@ -153,6 +153,8 @@ When a job fails after audio was captured (and was not cancelled), `processAudio
 
 electron-updater downloads a new release in the background. Closing the window only hides Tawny to the tray, so waiting for a real quit meant updates never installed. Now a downloaded update installs about a minute later, as soon as Tawny is idle (or at once from **Restart now**, or on tray **Quit**): the helpers (`tawny-wake`, `tawny-control`, `keywatcher`) and the engine are stopped first so no file is locked, then a silent install starts and relaunches Tawny. Update errors are logged with their cause.
 
+Tawny launches the installer itself (`launchInstaller` in `updater.ts`, with the same `--updated /S --force-run` arguments electron-updater uses) and quits only after Windows has created the installer process. Smart App Control refuses unsigned files it does not trust yet, and a release published minutes ago is not trusted. Node reports this as `spawn UNKNOWN`. electron-updater used to quit first and fail silently, so people reopened the old version, and the next launch downloaded and "installed" it again in a loop. Now a refusal is logged (`update.install.blocked`), Tawny keeps running, and the app shows the reason with **Try again** and **Release page**. `userData/update-attempt.json` records every attempt. If Tawny starts on an older version than the attempt, the install did not happen (`update.install.incomplete`), and Tawny won't close itself for that version again for 6 hours (`updatePolicy.ts`). Code-signing the installer is the only permanent fix for Smart App Control.
+
 ## Source map
 
 ```text

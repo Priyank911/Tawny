@@ -33,7 +33,7 @@ import {
 import { getRecentLogs, logPipeline, setLogSink } from './logger';
 import { startKeyWatcher, watchKeyRelease, cancelKeyReleaseWatch, makeWindowTopmost, stopKeyWatcher } from './keywatcherService';
 import { cancelGoogleSignIn, getAuthProfile, setAuthSessionInvalidatedHandler, signOut, startGoogleSignIn } from './auth';
-import { initializeUpdateService, isDownloadedUpdateReady, onUpdateAvailable, openLatestReleasePage } from './updater';
+import { canAutoInstallNow, initializeUpdateService, isDownloadedUpdateReady, launchInstaller, onUpdateAvailable, openLatestReleasePage } from './updater';
 import { linuxPasswordStorePreference } from './linuxKeyring';
 import { DEFAULT_GLOBAL_SHORTCUT, buildCompositorTriggerCommand, isWaylandSession, normalizeGlobalShortcut } from './hotkeyConfig';
 import { readGlobalShortcut, writeGlobalShortcut } from './hotkeyPreferences';
@@ -213,23 +213,22 @@ async function installUpdateFromNotice(): Promise<void> {
   }
   const updater = await initializeUpdateService();
   if (!updater || !isDownloadedUpdateReady()) throw new Error('The update is not fully downloaded yet. Wait for the download to finish, then try again.');
-  logPipeline({ event: 'update.install.start', message: 'Stopping the helpers and starting the update installer.' });
+  logPipeline({ event: 'update.install.start', message: 'Starting the update installer.' });
+  // Start the installer first and quit only once Windows has really created its process. Smart App
+  // Control refuses unsigned installers it does not trust yet; quitting before knowing that left people
+  // on the old version, and the next launch downloaded and "installed" it again in a loop.
+  // launchInstaller logs the refusal and shows the reason in the app; Tawny keeps running.
+  await launchInstaller();
   quitting = true;
   try {
-    // The installer replaces files in resources/native; a helper that is still running keeps its exe locked
-    // and the install fails. Stop them all and give them a moment to exit before handing over.
+    // The installer waits for Tawny to exit, then replaces resources/native: stop the helpers so no exe stays locked.
     globalShortcut.unregisterAll();
     if (handsFreeStatus.state !== 'off') stopHandsFree();
     engine.stop();
     control.stop();
     stopKeyWatcher();
-    await new Promise((resolve) => setTimeout(resolve, 900));
-    // Silent install, then start the new version.
-    updater.quitAndInstall(true, true);
-  } catch (error) {
-    quitting = false;
-    logPipeline({ level: 'error', event: 'update.install.failure', message: error instanceof Error ? error.message : 'The update installer could not start.' });
-    throw error;
+  } finally {
+    app.quit();
   }
 }
 
@@ -251,7 +250,7 @@ function scheduleUpdateInstall(): void {
   if (updateInstallTimer) return;
   const attempt = (): void => {
     updateInstallTimer = undefined;
-    if (!isDownloadedUpdateReady()) return;
+    if (!isDownloadedUpdateReady() || !canAutoInstallNow()) return;
     if (!isIdleForUpdate()) {
       updateInstallTimer = setTimeout(attempt, 10_000);
       return;
@@ -554,7 +553,7 @@ function createTray(): void {
       label: 'Quit Tawny',
       click: () => {
         // With an update waiting, quitting installs it the safe way (helpers stopped first).
-        if (isDownloadedUpdateReady()) {
+        if (isDownloadedUpdateReady() && canAutoInstallNow()) {
           void installUpdateFromNotice().catch(() => { quitting = true; app.quit(); });
           return;
         }
@@ -1447,7 +1446,7 @@ onUpdateAvailable((notice: UpdateNotice) => {
   if (updateNotificationsShown.has(notificationKey)) return;
   updateNotificationsShown.add(notificationKey);
   if (!Notification.isSupported()) return;
-  const notification = new Notification({ title: notice.state === 'ready' ? 'Tawny update ready' : 'Tawny early preview update', body: notice.message });
+  const notification = new Notification({ title: notice.state === 'ready' ? 'Tawny update ready' : notice.state === 'blocked' ? 'Windows blocked the Tawny update' : 'Tawny early preview update', body: notice.message });
   notification.on('click', () => {
     if (notice.state === 'ready') void installUpdateFromNotice().catch((error: unknown) => logPipeline({ level: 'warn', event: 'update.install.failure', message: error instanceof Error ? error.message : 'The update could not be installed.' }));
     else void openLatestReleasePage();

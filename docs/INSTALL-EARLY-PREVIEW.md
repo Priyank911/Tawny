@@ -6,7 +6,7 @@ Do not run a file if its source or checksum does not match the official release.
 
 ## Windows
 
-Download `Tawny-VERSION-windows-x64.exe` and run it, replacing `VERSION` with the release number (for example, `0.1.15`). Windows may show **Unknown publisher** or a SmartScreen warning because the installer is not Authenticode-signed and has limited download reputation. Check its SHA-256 against the matching `SHA256SUMS` entry first. If the source or digest does not match, cancel the installer; do not disable Defender or SmartScreen to proceed.
+Download `Tawny-VERSION-windows-x64.exe` and run it, replacing `VERSION` with the release number (for example, `0.1.16`). Windows may show **Unknown publisher** or a SmartScreen warning because the installer is not Authenticode-signed and has limited download reputation. Check its SHA-256 against the matching `SHA256SUMS` entry first. If the source or digest does not match, cancel the installer; do not disable Defender or SmartScreen to proceed.
 
 ## Hands-free mode
 
