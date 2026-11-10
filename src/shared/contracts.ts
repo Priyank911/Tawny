@@ -109,7 +109,7 @@ export interface AuthProfile {
 }
 
 export interface UpdateNotice {
-  state: 'available' | 'downloading' | 'ready' | 'manual' | 'error';
+  state: 'available' | 'downloading' | 'ready' | 'manual' | 'error' | 'blocked';
   version?: string;
   message: string;
 }

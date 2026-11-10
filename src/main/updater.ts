@@ -1,6 +1,10 @@
 import { app } from 'electron';
+import { spawn, type ChildProcess } from 'node:child_process';
+import { readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { autoUpdater, type AppUpdater } from 'electron-updater';
 import { logPipeline } from './logger';
+import { blockedMessage, isPolicyBlock, shouldAutoInstall } from './updatePolicy';
 import type { UpdateNotice } from '../shared/contracts';
 
 const RELEASES_URL = 'https://github.com/Priyank911/Tawny/releases';
@@ -10,6 +14,90 @@ let started = false;
 let updaterInstance: AppUpdater | undefined;
 let downloadedUpdateReady = false;
 let lastProgressBucket = -1;
+let downloadedFile: string | undefined;
+let downloadedVersion: string | undefined;
+/** A version whose install did not happen (blocked by Windows, or the installer failed). */
+let failedInstall: InstallAttempt | undefined;
+
+/**
+ * Written just before the installer is launched. If Tawny starts again still on
+ * the old version, the install did not happen, and the app must not quit every
+ * minute to retry it (which is what a blocked installer used to cause).
+ */
+interface InstallAttempt {
+  version: string;
+  at: number;
+  blocked?: boolean;
+  reason?: string;
+}
+
+const attemptPath = (): string => join(app.getPath('userData'), 'update-attempt.json');
+
+function readAttempt(): InstallAttempt | undefined {
+  try {
+    const parsed = JSON.parse(readFileSync(attemptPath(), 'utf8')) as InstallAttempt;
+    return typeof parsed.version === 'string' && typeof parsed.at === 'number' ? parsed : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function writeAttempt(attempt: InstallAttempt | undefined): void {
+  try {
+    if (attempt) writeFileSync(attemptPath(), JSON.stringify(attempt), 'utf8');
+    else rmSync(attemptPath(), { force: true });
+  } catch {
+    // Best effort: without the marker the only cost is one extra automatic attempt.
+  }
+}
+
+export function canAutoInstallNow(): boolean {
+  return shouldAutoInstall(failedInstall, downloadedVersion);
+}
+
+/**
+ * Starts the downloaded installer and resolves only once Windows has actually
+ * created the process. Rejects, and Tawny keeps running, when it is refused.
+ */
+export function launchInstaller(): Promise<void> {
+  const file = downloadedFile;
+  const version = downloadedVersion;
+  if (!file || !version) return Promise.reject(new Error('The update is not fully downloaded yet. Wait for the download to finish, then try again.'));
+  writeAttempt({ version, at: Date.now() });
+  return new Promise((resolve, reject) => {
+    const fail = (error: NodeJS.ErrnoException): void => {
+      const blocked = isPolicyBlock(error.code);
+      failedInstall = { version, at: Date.now(), blocked, reason: error.code ?? error.message };
+      writeAttempt(failedInstall);
+      logPipeline({
+        level: 'warn',
+        event: blocked ? 'update.install.blocked' : 'update.install.failure',
+        message: blocked
+          ? `Windows refused to start the ${version} installer (${error.code}); most likely Smart App Control.`
+          : `The ${version} installer could not start: ${error.message}`,
+        data: { code: error.code ?? '' }
+      });
+      const notice: UpdateNotice = blocked
+        ? { state: 'blocked', version, message: blockedMessage(version, app.getVersion()) }
+        : { state: 'error', version, message: `The Tawny ${version} installer could not start. Try again, or download it from the release page.` };
+      emit(notice);
+      reject(Object.assign(new Error(notice.message), { code: error.code }));
+    };
+    let child: ChildProcess;
+    try {
+      // The arguments electron-updater uses for a silent NSIS update that relaunches the app.
+      child = spawn(file, ['--updated', '/S', '--force-run'], { detached: true, stdio: 'ignore' });
+    } catch (error) {
+      fail(error as NodeJS.ErrnoException);
+      return;
+    }
+    child.once('error', fail);
+    child.once('spawn', () => {
+      child.unref();
+      resolve();
+    });
+  });
+}
 
 function emit(notice: UpdateNotice): void {
   for (const listener of listeners) listener(notice);
@@ -102,7 +190,18 @@ export async function initializeUpdateService(): Promise<AppUpdater | undefined>
   updaterInstance = autoUpdater;
   autoUpdater.allowPrerelease = true;
   autoUpdater.autoDownload = true;
-  autoUpdater.autoInstallOnAppQuit = true;
+  // Tawny launches the installer itself (launchInstaller) so a refused installer is noticed before it quits.
+  autoUpdater.autoInstallOnAppQuit = false;
+  const previous = readAttempt();
+  if (previous) {
+    if (compareVersions(previous.version, app.getVersion()) > 0) {
+      failedInstall = previous;
+      logPipeline({ level: 'warn', event: 'update.install.incomplete', message: `The ${previous.version} update did not install; still on ${app.getVersion()}.`, data: { version: previous.version, blocked: String(Boolean(previous.blocked)) } });
+    } else {
+      writeAttempt(undefined);
+      logPipeline({ event: 'update.install.success', message: `Updated to ${app.getVersion()}.` });
+    }
+  }
   autoUpdater.on('checking-for-update', () => {
     logPipeline({ event: 'update.check.start', message: 'Checking GitHub Releases for an early-preview update.' });
   });
@@ -121,6 +220,16 @@ export async function initializeUpdateService(): Promise<AppUpdater | undefined>
   });
   autoUpdater.on('update-downloaded', (info) => {
     downloadedUpdateReady = true;
+    downloadedFile = info.downloadedFile;
+    downloadedVersion = info.version;
+    if (!canAutoInstallNow()) {
+      // This version could not be installed recently: say so instead of closing Tawny again.
+      logPipeline({ event: 'update.downloaded', message: `Early preview ${info.version} downloaded; its last install did not complete, so it waits for Try again.` });
+      emit(failedInstall?.blocked
+        ? { state: 'blocked', version: info.version, message: blockedMessage(info.version, app.getVersion()) }
+        : { state: 'error', version: info.version, message: `Tawny ${info.version} did not install last time. Choose Try again, or download it from the release page.` });
+      return;
+    }
     logPipeline({ event: 'update.downloaded', message: `Early preview ${info.version} downloaded; Tawny will restart to install it when it is idle.` });
     emit({ state: 'ready', version: info.version, message: `Tawny ${info.version} is ready. Tawny restarts to install it in about a minute, or choose Restart now.` });
   });

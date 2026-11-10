@@ -633,8 +633,8 @@ button.chip { cursor: pointer; }
 .update-strip > svg { flex: none; color: var(--accent); }
 .update-strip > span { flex: 1; min-width: 0; }
 .update-strip strong { color: var(--ink); }
-.update-strip.update-error { border-left-color: var(--bad); }
-.update-strip.update-error > svg { color: var(--bad); }
+.update-strip.update-error, .update-strip.update-blocked { border-left-color: var(--bad); }
+.update-strip.update-error > svg, .update-strip.update-blocked > svg { color: var(--bad); }
 
 /* ---------- signed out ---------- */
 

@@ -446,7 +446,8 @@ function App(): ReactElement {
       await window.voiceRouter?.installUpdate();
     } catch (error) {
       setInstallingUpdate(false);
-      setUpdateNotice({ state: 'error', message: error instanceof Error ? error.message : 'The update could not be installed.' });
+      const message = error instanceof Error ? error.message.replace(/^Error invoking remote method '[^']+': (Error: )?/, '') : 'The update could not be installed.';
+      setUpdateNotice((current) => ({ state: message.startsWith('Windows blocked') ? 'blocked' : 'error', ...(current?.version ? { version: current.version } : {}), message }));
     }
   }
 
@@ -472,7 +473,9 @@ function App(): ReactElement {
   const updateBanner = updateNotice ? (
     <aside className={`update-strip update-${updateNotice.state}`} role="status">
       <Download size={14} />
-      <span><strong>{updateNotice.state === 'ready' ? 'Update ready.' : updateNotice.state === 'error' ? 'Update check.' : 'Update.'}</strong> {updateNotice.message}</span>
+      <span><strong>{updateNotice.state === 'ready' ? 'Update ready.' : updateNotice.state === 'blocked' ? 'Update blocked.' : updateNotice.state === 'error' ? 'Update check.' : 'Update.'}</strong> {updateNotice.message}</span>
+      {(updateNotice.state === 'blocked' || (updateNotice.state === 'error' && updateNotice.version)) && <button className="btn btn-small btn-ink" disabled={installingUpdate} onClick={() => void installUpdate()}>{installingUpdate ? 'Starting…' : 'Try again'}</button>}
+      {(updateNotice.state === 'blocked' || updateNotice.state === 'error') && <button className="btn btn-small btn-quiet" onClick={() => void window.voiceRouter?.openReleasePage()}>Release page</button>}
       {(updateNotice.state === 'manual' || updateNotice.state === 'ready') && <button className="btn btn-small btn-ink" disabled={installingUpdate} onClick={() => void (updateNotice.state === 'ready' ? installUpdate() : window.voiceRouter?.openReleasePage())}>{updateNotice.state === 'ready' ? installingUpdate ? 'Restarting…' : 'Restart now' : 'View release'}</button>}
       <button className="icon-btn" aria-label="Dismiss update notice" onClick={() => setUpdateNotice(undefined)}><X size={13} /></button>
     </aside>

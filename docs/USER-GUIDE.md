@@ -129,6 +129,8 @@ Open **Activity** in Tawny or read `logs/pipeline.jsonl` inside the applicationâ
 
 ## Updating Tawny
 
+If Windows **Smart App Control** is on, it can block a brand-new Tawny installer because the installer is not code-signed yet. Tawny then stays open on your current version and shows **Update blocked** with the reason. Choose **Try again** later (Windows starts trusting a release after a while), or use **Release page** to download the installer yourself. Tawny does not keep closing itself to retry a blocked update.
+
 Tawny checks the GitHub early-preview releases and downloads an update in the background. About a minute after the download finishes, Tawny restarts itself to install it as soon as it is not busy; choose **Restart now** in the update notice to do it at once. Closing the window only hides Tawny to the tray, so you do not need to close it for an update. Read the [install notes](./INSTALL-EARLY-PREVIEW.md) for details.
 
 ## Feedback
