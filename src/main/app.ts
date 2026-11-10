@@ -5,7 +5,7 @@ import { writeFile } from 'node:fs/promises';
 import { createActor } from 'xstate';
 import { pipelineMachine } from './pipeline/machine';
 import { commandFromWakeTranscript, gateTranscriptDetailed } from './pipeline/gate';
-import { heuristicRoute, needsSelectionCapture, reconcileIntent } from './pipeline/router';
+import { acceptWakeWithoutPhrase, heuristicRoute, needsSelectionCapture, reconcileIntent } from './pipeline/router';
 import { captureSelectedText, pasteImage, pasteText } from './inject';
 import { PipelineError, type AuthProfile, type BehaviorSettings, type CaptureSource, type HandsFreeStatus, type HotkeyStatus, type HotkeyTestResult, type JobHistoryEntry, type OverlaySnapshot, type UpdateNotice } from '../shared/contracts';
 import { readProviderSettings, saveProviderSettings, secureStorageAvailable } from './settings';
@@ -1049,6 +1049,18 @@ async function processAudio(segments: Uint8Array[], options: ProcessOptions): Pr
       gateOriginal: gate.original,
       selectedText
     });
+    // A hands-free wake that Whisper did not confirm acts only on a clear command; anything else was overheard.
+    if (wakeCommand && !wakeCommand.heardWakePhrase && !acceptWakeWithoutPhrase(route, selectedText)) {
+      logPipeline({
+        event: 'wake.unconfirmed',
+        message: 'Whisper did not hear “Hey Tawny” and the speech was not a clear command; treating the wake as overheard and doing nothing.',
+        jobId: activeJobId,
+        stage: 'gate',
+        data: { guardrail: String(route.matched), intent: route.intent }
+      });
+      discardJob('Probably not addressed to Tawny.');
+      return '';
+    }
     let decision: ClefDecisionResult | undefined;
     if (route.fastRewrite) decision = { intent: 'text_rewrite', tier: 'fast', confidence: 1 };
     else if (route.consult !== 'none') {

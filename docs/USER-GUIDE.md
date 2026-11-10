@@ -93,6 +93,10 @@ Delete the Tawny/voicerouter application-data folder to clear its local images, 
 
 ## Troubleshooting
 
+### Hands-free reacted when nobody said “Hey Tawny”
+
+The Windows recognizer sometimes mistakes similar words or background talk (a video, people nearby) for the wake phrase. The orb may appear briefly. Tawny still does nothing unless Whisper hears “Hey Tawny” or the words are a clear command such as “open WhatsApp”. Overheard speech is never typed. Activity shows these as `wake.unconfirmed`.
+
 ### Hands-free does not react
 
 1. Open Settings and read the status line under **Hands-free and voice control**.
