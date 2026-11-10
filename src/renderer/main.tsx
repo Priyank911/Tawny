@@ -1,8 +1,10 @@
 import { StrictMode, useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactElement } from 'react';
 import { createRoot } from 'react-dom/client';
-import { ChevronRight, Image as ImageIcon, LoaderCircle, Sparkles, ScrollText, Settings2, X, Keyboard, ShieldCheck, Code as CodeIcon, FileText as FileTextIcon, LogOut, UserRound, ExternalLink, Download, MousePointer2, Mic } from 'lucide-react';
-import type { AuthProfile, BehaviorSettings, HandsFreeStatus, HotkeyStatus, OverlaySnapshot, PipelineLog, ProviderSettings, UpdateNotice } from '../shared/contracts';
+import { ChevronRight, Image as ImageIcon, LoaderCircle, Sparkles, X, ShieldCheck, Code as CodeIcon, FileText as FileTextIcon, ExternalLink, Download, MousePointer2, Mic, Minus } from 'lucide-react';
+import type { AuthProfile, BehaviorSettings, HandsFreeStatus, HotkeyStatus, JobHistoryEntry, OverlaySnapshot, PipelineLog, ProviderSettings, RecoveryState, UpdateNotice } from '../shared/contracts';
+import { ActivityPage, HomePage, RecordingsPage, SettingsSection, Shell, type Page } from './shell';
 import './styles.css';
+import './shell.css';
 
 const RECORDING_SEGMENT_MS = 60_000;
 const DEFAULT_SHORTCUT = 'Ctrl+Alt+Space';
@@ -37,17 +39,20 @@ const IS_OVERLAY = VIEW === 'overlay';
 
 function App(): ReactElement {
   const [snapshot, setSnapshot] = useState<OverlaySnapshot>({ state: 'idle', elapsedMs: 0, rms: 0 });
-  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [page, setPage] = useState<Page>('home');
+  const pageRef = useRef<Page>('home');
+  const settingsOpen = page === 'settings';
+  const [history, setHistory] = useState<JobHistoryEntry[]>([]);
+  const [recovery, setRecovery] = useState<RecoveryState | undefined>(undefined);
+  const [appVersion, setAppVersion] = useState('');
   const [settings, setSettings] = useState<ProviderSettings>({
     groqApiKey: '', cloudflareAccountId: '', cloudflareApiToken: ''
   });
   const [saved, setSaved] = useState(false);
-  const [logsOpen, setLogsOpen] = useState(false);
   const [logs, setLogs] = useState<PipelineLog[]>([]);
   const [authProfile, setAuthProfile] = useState<AuthProfile | undefined>(undefined);
   const [authBusy, setAuthBusy] = useState(false);
   const [authError, setAuthError] = useState('');
-  const [accountMenuOpen, setAccountMenuOpen] = useState(false);
   const [updateNotice, setUpdateNotice] = useState<UpdateNotice | undefined>(undefined);
   const [hotkeyStatus, setHotkeyStatus] = useState<HotkeyStatus>({ accelerator: DEFAULT_SHORTCUT, registered: false, wayland: false, message: 'Checking shortcut registration…' });
   const [hotkeyDraft, setHotkeyDraft] = useState(DEFAULT_SHORTCUT);
@@ -112,8 +117,17 @@ function App(): ReactElement {
     }).catch(() => undefined);
     const unsubscribeSnapshot = window.voiceRouter.subscribe(setSnapshot);
     // Settings and the Live log belong to the app window only; the overlay must never claim Settings is open.
-    const unsubscribeSettings = IS_OVERLAY ? () => undefined : window.voiceRouter.onOpenSettings(openSettingsPanel);
-    const unsubscribeOpenLogs = IS_OVERLAY ? () => undefined : window.voiceRouter.onOpenLogs(() => setLogsOpen(true));
+    const unsubscribeSettings = IS_OVERLAY ? () => undefined : window.voiceRouter.onOpenSettings(() => navigate('settings'));
+    const unsubscribeOpenLogs = IS_OVERLAY ? () => undefined : window.voiceRouter.onOpenLogs(() => navigate('activity'));
+    let unsubscribeHistory: () => void = () => undefined;
+    let unsubscribeRecovery: () => void = () => undefined;
+    if (!IS_OVERLAY) {
+      void window.voiceRouter.getHistory().then(setHistory).catch(() => undefined);
+      void window.voiceRouter.getRecovery().then(setRecovery).catch(() => undefined);
+      void window.voiceRouter.getAppInfo().then((info) => setAppVersion(info.version)).catch(() => undefined);
+      unsubscribeHistory = window.voiceRouter.onHistory(setHistory);
+      unsubscribeRecovery = window.voiceRouter.onRecovery(setRecovery);
+    }
     const unsubscribeAuth = window.voiceRouter.onAuthProfile(setAuthProfile);
     const unsubscribeAuthRequired = window.voiceRouter.onAuthRequired(() => {
       setAuthProfile(undefined);
@@ -133,8 +147,23 @@ function App(): ReactElement {
       unsubscribeUpdate();
       unsubscribeHandsFree();
       unsubscribeLogs();
+      unsubscribeHistory();
+      unsubscribeRecovery();
     };
   }, []);
+  // The global shortcut is held back only while Settings is on screen and focused (so recording a new key
+  // never starts a job). On any other page, or with the window in the background, it always works.
+  useEffect(() => {
+    if (IS_OVERLAY || !window.voiceRouter) return undefined;
+    const sync = (): void => window.voiceRouter.setSettingsOpen(page === 'settings' && document.hasFocus());
+    sync();
+    window.addEventListener('focus', sync);
+    window.addEventListener('blur', sync);
+    return () => {
+      window.removeEventListener('focus', sync);
+      window.removeEventListener('blur', sync);
+    };
+  }, [page]);
   useEffect(() => {
     if (!authProfile) {
       setSettings({ groqApiKey: '', cloudflareAccountId: '', cloudflareApiToken: '' });
@@ -312,14 +341,13 @@ function App(): ReactElement {
       setBehavior(behavior);
     }
   }
-  function openSettingsPanel(): void {
-    window.voiceRouter?.setSettingsOpen(true);
-    setSettingsOpen(true);
-  }
-
-  function closeSettingsPanel(): void {
-    setSettingsOpen(false);
-    void window.voiceRouter?.closeSettings();
+  function navigate(next: Page): void {
+    if (pageRef.current === 'settings' && next !== 'settings') {
+      setRecordingHotkey(false);
+      void window.voiceRouter?.closeSettings();
+    }
+    pageRef.current = next;
+    setPage(next);
   }
 
   async function saveSettings(): Promise<void> {
@@ -429,7 +457,6 @@ function App(): ReactElement {
     try {
       const profile = await window.voiceRouter.signIn();
       setAuthProfile(profile);
-      setAccountMenuOpen(false);
     } catch (error) {
       setAuthError(error instanceof Error ? error.message : 'Google sign-in could not be completed. Check your connection and try again.');
     } finally {
@@ -439,82 +466,134 @@ function App(): ReactElement {
 
   async function handleSignOut(): Promise<void> {
     await window.voiceRouter?.signOut();
-    setAccountMenuOpen(false);
+    navigate('home');
   }
+
+  const updateBanner = updateNotice ? (
+    <aside className={`update-strip update-${updateNotice.state}`} role="status">
+      <Download size={14} />
+      <span><strong>{updateNotice.state === 'ready' ? 'Update ready.' : updateNotice.state === 'error' ? 'Update check.' : 'Update.'}</strong> {updateNotice.message}</span>
+      {(updateNotice.state === 'manual' || updateNotice.state === 'ready') && <button className="btn btn-small btn-ink" disabled={installingUpdate} onClick={() => void (updateNotice.state === 'ready' ? installUpdate() : window.voiceRouter?.openReleasePage())}>{updateNotice.state === 'ready' ? installingUpdate ? 'Restarting…' : 'Restart now' : 'View release'}</button>}
+      <button className="icon-btn" aria-label="Dismiss update notice" onClick={() => setUpdateNotice(undefined)}><X size={13} /></button>
+    </aside>
+  ) : undefined;
+
+  const settingsSections: Array<[string, string]> = [['set-shortcut', 'Shortcut'], ['set-handsfree', 'Hands-free'], ['set-providers', 'Providers'], ['set-about', 'About']];
+  const settingsPage = (
+    <div className="settings-page">
+      <nav className="set-index" aria-label="Settings sections">
+        {settingsSections.map(([id, title]) => (
+          <button key={id} onClick={() => document.getElementById(id)?.scrollIntoView({ behavior: 'smooth', block: 'start' })}>{title}</button>
+        ))}
+      </nav>
+      <div className="set-scroll">
+        <SettingsSection id="set-shortcut" title="Recording shortcut" hint="Press it anywhere to talk to Tawny." aside={<span className={`hotkey-state ${hotkeyStatus.registered ? 'is-registered' : 'needs-compositor'}`}>{hotkeyStatus.registered ? 'Registered' : hotkeyStatus.wayland ? 'Compositor setup' : 'Not registered'}</span>}>
+          <div className="hotkey-controls">
+            <kbd className="hotkey-preview">{displayShortcut(hotkeyDraft)}</kbd>
+            <button className="hotkey-secondary" onClick={() => void beginShortcutCapture()}>Record keys</button>
+            <button className="hotkey-secondary hotkey-test" onClick={() => void testShortcut()} disabled={hotkeyTestState === 'waiting'}>{hotkeyTestState === 'waiting' ? 'Listening…' : 'Test key'}</button>
+            <button className="hotkey-save" onClick={() => void saveShortcut()}>Save shortcut</button>
+          </div>
+          {recordingHotkey && <button className="hotkey-capture" onKeyDown={captureShortcut} onBlur={() => { setRecordingHotkey(false); void window.voiceRouter?.setHotkeyCaptureMode(false); }} autoFocus>Press your shortcut now · Esc cancels</button>}
+          <p className="hotkey-status-copy" role="status">{hotkeyStatus.message}</p>
+          {hotkeyStatus.wayland && hotkeyStatus.compositorCommand && <div className="compositor-command"><div><span>Wayland fallback command</span><small>Bind this in your compositor’s keyboard-shortcut settings if the portal shortcut doesn’t trigger.</small><code title={hotkeyStatus.compositorCommand}>{hotkeyStatus.compositorCommand}</code></div><button className="hotkey-secondary" onClick={() => void copyCompositorCommand()}>Copy</button></div>}
+          {hotkeyFeedback && <p className={`hotkey-feedback is-${hotkeyFeedback.state}`} role={hotkeyFeedback.state === 'error' ? 'alert' : 'status'}>
+            {hotkeyFeedback.state === 'waiting' ? <LoaderCircle size={12} className="signin-spinner" /> : hotkeyFeedback.state === 'success' ? <ShieldCheck size={12} /> : <X size={12} />}
+            <span>{hotkeyFeedback.message}</span>
+          </p>}
+        </SettingsSection>
+        <SettingsSection id="set-handsfree" title="Hands-free and voice control" hint="Say “Hey Tawny”, then your request. Windows only." aside={<span className={`hotkey-state ${handsFree.state === 'listening' ? 'is-registered' : 'needs-compositor'}`}>{handsFree.state === 'listening' ? 'Listening' : handsFree.state === 'off' ? 'Off' : handsFree.state === 'error' ? 'Problem' : handsFree.state === 'paused' ? 'Paused' : 'Starting'}</span>}>
+          <label className="toggle-row"><input type="checkbox" checked={behavior.handsFree} onChange={(event) => void updateBehavior({ handsFree: event.target.checked })} /><span><strong>Listen for “Hey Tawny”</strong><small>Keeps the microphone open while Tawny runs. The wake phrase is recognized on this PC; audio goes to Groq only after it.</small></span></label>
+          <p className={`hotkey-status-copy ${handsFree.state === 'error' ? 'is-error' : ''}`} role="status">{handsFree.message}</p>
+          <label className="toggle-row"><input type="checkbox" checked={behavior.controlStyle === 'visual'} onChange={(event) => void updateBehavior({ controlStyle: event.target.checked ? 'visual' : 'fast' })} /><span><strong>Show the cursor moving</strong><small>When off, Tawny opens things directly without animating the mouse. Moving the mouse stops any action.</small></span></label>
+          <label className="toggle-row"><input type="checkbox" checked={behavior.visionFallback} onChange={(event) => void updateBehavior({ visionFallback: event.target.checked })} /><span><strong>Use screenshots when an app cannot be read</strong><small>Off by default. When on, a screenshot is sent to Cloudflare to find a button Tawny cannot otherwise see.</small></span></label>
+        </SettingsSection>
+        <SettingsSection id="set-providers" title="Providers" hint="Keys are encrypted with Windows secure storage and never written to logs.">
+          <div className="settings-grid">
+            {([
+              ['groqApiKey', 'Groq API key', 'Whisper transcription'],
+              ['cloudflareAccountId', 'Cloudflare account ID', 'Workers AI account'],
+              ['cloudflareApiToken', 'Cloudflare API token', 'Understanding, writing and images']
+            ] as const).map(([key, title, hint]) => <label className="field" key={key}><span>{title}</span><small>{hint}</small><input type={key.toLowerCase().includes('key') || key.toLowerCase().includes('token') ? 'password' : 'text'} value={settings[key]} onChange={(event) => setSettings({ ...settings, [key]: event.target.value })} placeholder="Not connected" autoComplete="off" /></label>)}
+          </div>
+          <div className="settings-footer"><span className={saved ? 'saved' : ''}>{saved ? 'Saved securely' : 'Credentials stay on this device.'}</span><button className="btn btn-primary" onClick={() => void saveSettings()}>Save credentials</button></div>
+        </SettingsSection>
+        <SettingsSection id="set-about" title="About" hint="Early preview. Updates download in the background and install when Tawny is idle.">
+          <div className="about-row">
+            <span className="kicker">Version</span><span className="mono">{appVersion || '—'}</span>
+            <button className="btn btn-quiet" onClick={() => void window.voiceRouter?.openReleasePage()}><ExternalLink size={12} /> Release notes</button>
+          </div>
+        </SettingsSection>
+      </div>
+    </div>
+  );
 
   return (
     <main className={`app-shell state-${state} ${IS_OVERLAY ? 'overlay-page' : 'main-page'}`}>
       {!IS_OVERLAY ? (
-        <>
-          <header className="topbar">
-            <div className="brand">
-              <img className="brand-mark" src="./tawny-mark.svg" alt="" />
-              <span>Tawny</span>
-            </div>
-            <div className="top-actions">
-              <span className={`status-dot ${hotkeyStatus.registered ? '' : 'status-dot-warning'}`} />
-              <span className="status-label">{hotkeyStatus.registered ? 'READY' : hotkeyStatus.wayland ? 'SET KEY' : 'CHECK KEY'}</span>
-              <button className="main-settings-button" onClick={() => setLogsOpen(true)}><ScrollText size={13} /> Live log</button>
-              <button className="main-settings-button" onClick={openSettingsPanel}><SettingsIcon /> Settings</button>
-            </div>
-          </header>
-          <section className="welcome-page">
-            <div className="welcome-copy">
-              <span className="eyebrow">PRIVATE DESKTOP VOICE LAYER</span>
-              <h1>Speak naturally.<br /><em>Work precisely.</em></h1>
-              <p>Tawny listens for your shortcut, understands what you mean, and returns the result to the app already in focus.</p>
-              {authProfile ? <div className="welcome-actions">
-                <button className="launch-button" onClick={() => void window.voiceRouter?.enterBackground()}>
-                  Run in background <KeyboardIcon />
-                </button>
-                <button className="secondary-button" onClick={openSettingsPanel}>
-                  <SettingsIcon /> Configure providers
-                </button>
-              </div> : <p className="signin-trust-note"><ShieldCheck size={14} /> Sign in once on this device. Your Firebase session is kept in secure system storage.</p>}
-            </div>
-            {authProfile ? <div className="welcome-preview">
-              <div className="preview-orbit orbit-one" />
-              <div className="preview-orbit orbit-two" />
-              <div className="preview-card">
-                <img src="./tawny-mark.svg" alt="" />
-                <strong>Ready when you are</strong>
-                <span>{displayShortcut(hotkeyStatus.accelerator)}</span>
+        authProfile ? (
+          <Shell
+            page={page}
+            onNavigate={navigate}
+            profile={authProfile}
+            handsFree={handsFree}
+            onToggleHandsFree={() => void updateBehavior({ handsFree: !behavior.handsFree })}
+            recovery={recovery}
+            version={appVersion}
+            onSignOut={() => void handleSignOut()}
+            banner={updateBanner}
+          >
+            {page === 'home' && <HomePage
+              profile={authProfile}
+              shortcut={hotkeyStatus.accelerator}
+              shortcutRegistered={hotkeyStatus.registered}
+              behavior={behavior}
+              handsFree={handsFree}
+              history={history}
+              recovery={recovery}
+              onBehavior={(patch) => void updateBehavior(patch)}
+              onNavigate={navigate}
+              onBackground={() => void window.voiceRouter?.enterBackground()}
+            />}
+            {page === 'recordings' && <RecordingsPage state={recovery} />}
+            {page === 'activity' && <ActivityPage logs={logs} shortcut={hotkeyStatus.accelerator} />}
+            {page === 'settings' && settingsPage}
+          </Shell>
+        ) : (
+          <div className="signed-out">
+            <header className="titlebar titlebar-floating">
+              <div className="brand"><img className="brand-mark" src="./tawny-mark.svg" alt="" /><span>Tawny</span></div>
+              <div className="window-controls">
+                <button aria-label="Minimize" onClick={() => void window.voiceRouter?.windowAction('minimize')}><Minus size={14} /></button>
+                <button aria-label="Close to tray" onClick={() => void window.voiceRouter?.windowAction('hide')}><X size={14} /></button>
               </div>
-            </div> : <div className="signin-column">
-              <div className="signin-card">
-                <div className="signin-wave" aria-hidden="true"><span /><span /><span /><span /><span /><span /><span /></div>
-                <p className="eyebrow">YOUR VOICE, YOUR WORKSPACE</p>
-                <h2>Sign in to Tawny</h2>
-                <p className="signin-description">Use your Google account to unlock your desktop voice assistant.</p>
-                <button className="google-signin-button" onClick={() => void handleGoogleSignIn()} disabled={authBusy}>
-                  {authBusy ? <LoaderCircle className="signin-spinner" size={17} /> : <GoogleMark />}
-                  {authBusy ? 'Waiting for Google…' : 'Continue with Google'}
-                  {!authBusy && <ExternalLink size={14} className="signin-external-icon" />}
-                </button>
-                {authBusy && <button className="signin-cancel" onClick={() => { void window.voiceRouter?.cancelSignIn(); setAuthBusy(false); }}>Cancel sign-in</button>}
-                {authError && <p className="signin-error" role="alert">{authError}</p>}
-                <p className="signin-footnote"><ShieldCheck size={13} /> Google handles your password. Tawny stores only an encrypted Firebase session.</p>
+            </header>
+            <section className="welcome-page">
+              <div className="welcome-copy">
+                <span className="eyebrow">PRIVATE DESKTOP VOICE LAYER</span>
+                <h1>Speak naturally.<br /><em>Work precisely.</em></h1>
+                <p>Tawny listens for your shortcut or “Hey Tawny”, understands what you mean, and returns the result to the app already in focus.</p>
+                <p className="signin-trust-note"><ShieldCheck size={14} /> Sign in once on this device. Your session is kept in secure system storage.</p>
               </div>
-            </div>}
-          </section>
-          {authProfile && <div className="account-anchor">
-            <button className="account-button" title={authProfile.email} aria-label={`Account: ${authProfile.email}`} aria-expanded={accountMenuOpen} onClick={() => setAccountMenuOpen((open) => !open)}>
-              <span className="account-avatar">{authProfile.displayName.slice(0, 1).toUpperCase()}</span>
-              <span className="account-hover-email">{authProfile.email}</span>
-            </button>
-            {accountMenuOpen && <div className="account-menu" role="menu">
-              <span className="account-menu-label">SIGNED IN AS</span>
-              <strong>{authProfile.email}</strong>
-              <button role="menuitem" onClick={() => void handleSignOut()}><LogOut size={14} /> Sign out</button>
-            </div>}
-          </div>}
-          {updateNotice && <aside className={`update-notice update-${updateNotice.state}`} role="status">
-            <div className="update-notice-icon"><Download size={15} /></div>
-            <div className="update-notice-copy"><strong>{updateNotice.state === 'ready' ? 'Update ready' : updateNotice.state === 'error' ? 'Update check' : 'Early preview update'}</strong><span>{updateNotice.message}</span></div>
-            {(updateNotice.state === 'manual' || updateNotice.state === 'ready') && <button className="update-action" disabled={installingUpdate} onClick={() => void (updateNotice.state === 'ready' ? installUpdate() : window.voiceRouter?.openReleasePage())}>{updateNotice.state === 'ready' ? installingUpdate ? 'Restarting…' : 'Restart now' : 'View release'}</button>}
-            <button className="update-dismiss" aria-label="Dismiss update notice" onClick={() => setUpdateNotice(undefined)}><X size={14} /></button>
-          </aside>}
-        </>
+              <div className="signin-column">
+                <div className="signin-card">
+                  <div className="signin-wave" aria-hidden="true"><span /><span /><span /><span /><span /><span /><span /></div>
+                  <p className="eyebrow">YOUR VOICE, YOUR WORKSPACE</p>
+                  <h2>Sign in to Tawny</h2>
+                  <p className="signin-description">Use your Google account to unlock your desktop voice assistant.</p>
+                  <button className="google-signin-button" onClick={() => void handleGoogleSignIn()} disabled={authBusy}>
+                    {authBusy ? <LoaderCircle className="signin-spinner" size={17} /> : <GoogleMark />}
+                    {authBusy ? 'Waiting for Google…' : 'Continue with Google'}
+                    {!authBusy && <ExternalLink size={14} className="signin-external-icon" />}
+                  </button>
+                  {authBusy && <button className="signin-cancel" onClick={() => { void window.voiceRouter?.cancelSignIn(); setAuthBusy(false); }}>Cancel sign-in</button>}
+                  {authError && <p className="signin-error" role="alert">{authError}</p>}
+                  <p className="signin-footnote"><ShieldCheck size={13} /> Google handles your password. Tawny stores only an encrypted Firebase session.</p>
+                </div>
+              </div>
+            </section>
+          </div>
+        )
       ) : (
         <div className="tawny-overlay-wrapper">
           {snapshot.source === 'wake' && isListening ? (
@@ -607,59 +686,8 @@ function App(): ReactElement {
           )}
         </div>
       )}
-      {settingsOpen && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.currentTarget === event.target) closeSettingsPanel(); }}>
-        <section className="settings-panel" role="dialog" aria-modal="true" aria-labelledby="settings-title">
-          <div className="settings-heading"><div><p className="eyebrow">TAWNY / SETTINGS</p><h2 id="settings-title">Connect your providers</h2><p>Keys are encrypted with Windows secure storage and never written to logs.</p></div><button className="close-button" onClick={closeSettingsPanel} aria-label="Close settings"><X size={17} /></button></div>
-          <section className="hotkey-settings" aria-labelledby="hotkey-title">
-            <div className="hotkey-settings-heading"><div><span id="hotkey-title">Recording shortcut</span><small>Choose the key combination Tawny listens for.</small></div><span className={`hotkey-state ${hotkeyStatus.registered ? 'is-registered' : 'needs-compositor'}`}>{hotkeyStatus.registered ? 'Registered' : hotkeyStatus.wayland ? 'Compositor setup' : 'Not registered'}</span></div>
-            <div className="hotkey-controls">
-              <kbd className="hotkey-preview">{displayShortcut(hotkeyDraft)}</kbd>
-              <button className="hotkey-secondary" onClick={() => void beginShortcutCapture()}>Record keys</button>
-              <button className="hotkey-secondary hotkey-test" onClick={() => void testShortcut()} disabled={hotkeyTestState === 'waiting'}>{hotkeyTestState === 'waiting' ? 'Listening…' : 'Test key'}</button>
-              <button className="hotkey-save" onClick={() => void saveShortcut()}>Save shortcut</button>
-            </div>
-            {recordingHotkey && <button className="hotkey-capture" onKeyDown={captureShortcut} onBlur={() => { setRecordingHotkey(false); void window.voiceRouter?.setHotkeyCaptureMode(false); }} autoFocus>Press your shortcut now · Esc cancels</button>}
-            <p className="hotkey-status-copy" role="status">{hotkeyStatus.message}</p>
-            {hotkeyStatus.wayland && hotkeyStatus.compositorCommand && <div className="compositor-command"><div><span>Wayland fallback command</span><small>Bind this in your compositor’s keyboard-shortcut settings if the portal shortcut doesn’t trigger.</small><code title={hotkeyStatus.compositorCommand}>{hotkeyStatus.compositorCommand}</code></div><button className="hotkey-secondary" onClick={() => void copyCompositorCommand()}>Copy</button></div>}
-            {hotkeyFeedback && <p className={`hotkey-feedback is-${hotkeyFeedback.state}`} role={hotkeyFeedback.state === 'error' ? 'alert' : 'status'}>
-              {hotkeyFeedback.state === 'waiting' ? <LoaderCircle size={12} className="signin-spinner" /> : hotkeyFeedback.state === 'success' ? <ShieldCheck size={12} /> : <X size={12} />}
-              <span>{hotkeyFeedback.message}</span>
-            </p>}
-          </section>
-          <section className="hotkey-settings behavior-settings" aria-labelledby="handsfree-title">
-            <div className="hotkey-settings-heading"><div><span id="handsfree-title">Hands-free and voice control</span><small>Say “Hey Tawny”, then your command. Windows only.</small></div><span className={`hotkey-state ${handsFree.state === 'listening' ? 'is-registered' : 'needs-compositor'}`}>{handsFree.state === 'listening' ? 'Listening' : handsFree.state === 'off' ? 'Off' : handsFree.state === 'error' ? 'Problem' : 'Starting'}</span></div>
-            <label className="toggle-row"><input type="checkbox" checked={behavior.handsFree} onChange={(event) => void updateBehavior({ handsFree: event.target.checked })} /><span><strong>Listen for “Hey Tawny”</strong><small>Keeps the microphone open while Tawny runs. Recognition of the wake phrase happens on this PC; audio is uploaded to Groq only after a wake phrase.</small></span></label>
-            <p className={`hotkey-status-copy ${handsFree.state === 'error' ? 'is-error' : ''}`} role="status">{handsFree.message}</p>
-            <label className="toggle-row"><input type="checkbox" checked={behavior.controlStyle === 'visual'} onChange={(event) => void updateBehavior({ controlStyle: event.target.checked ? 'visual' : 'fast' })} /><span><strong>Show the cursor moving</strong><small>When off, Tawny opens things directly without animating the mouse. Moving the mouse stops any action.</small></span></label>
-            <label className="toggle-row"><input type="checkbox" checked={behavior.visionFallback} onChange={(event) => void updateBehavior({ visionFallback: event.target.checked })} /><span><strong>Use screenshots when an app cannot be read</strong><small>Off by default. When on, a screenshot of your screen is sent to Cloudflare to find a button Tawny cannot otherwise see.</small></span></label>
-          </section>
-          <div className="settings-grid">
-            {([
-              ['groqApiKey', 'Groq API key', 'Used for Whisper transcription'],
-              ['cloudflareAccountId', 'Cloudflare account ID', 'Workers AI account identifier'],
-              ['cloudflareApiToken', 'Cloudflare API token', 'Workers AI inference and image generation']
-            ] as const).map(([key, title, hint]) => <label className="field" key={key}><span>{title}</span><small>{hint}</small><input type={key.toLowerCase().includes('key') || key.toLowerCase().includes('token') ? 'password' : 'text'} value={settings[key]} onChange={(event) => setSettings({ ...settings, [key]: event.target.value })} placeholder="Not connected" autoComplete="off" /></label>)}
-          </div>
-          <div className="settings-footer"><span className={saved ? 'saved' : ''}>{saved ? 'Saved securely' : 'Credentials stay on this device.'}</span><button className="save-button" onClick={() => void saveSettings()}>Save credentials</button></div>
-        </section>
-      </div>}
-      {logsOpen && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.currentTarget === event.target) setLogsOpen(false); }}>
-        <section className="logs-panel" role="dialog" aria-modal="true" aria-labelledby="logs-title">
-          <div className="settings-heading"><div><p className="eyebrow">TAWNY / DIAGNOSTICS</p><h2 id="logs-title">Live pipeline log</h2><p>Every stage transition is recorded locally. Secrets and transcript contents are redacted.</p></div><button className="close-button" onClick={() => setLogsOpen(false)} aria-label="Close live log"><X size={17} /></button></div>
-          <div className="log-list">{logs.length === 0 ? <p className="empty-log">No pipeline activity yet. Press {displayShortcut(hotkeyStatus.accelerator)} to start a job.</p> : logs.map((entry, index) => <div className={`log-entry log-${entry.level}`} key={`${entry.timestamp}-${index}`}><time>{new Date(entry.timestamp).toLocaleTimeString()}</time><span className="log-event">{entry.event}</span><span className="log-message">{entry.message}</span>{entry.durationMs !== undefined && <span className="log-duration">{entry.durationMs}ms</span>}</div>)}</div>
-          <div className="settings-footer"><span>{logs.length} recent events · JSONL file is stored in the Tawny app data logs folder.</span><button className="save-button" onClick={() => setLogsOpen(false)}>Close log</button></div>
-        </section>
-      </div>}
     </main>
   );
-}
-
-function KeyboardIcon(): ReactElement {
-  return <Keyboard size={13} aria-hidden="true" />;
-}
-
-function SettingsIcon(): ReactElement {
-  return <Settings2 size={13} aria-hidden="true" />;
 }
 
 function GoogleMark(): ReactElement {

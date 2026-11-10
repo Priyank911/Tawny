@@ -1,4 +1,4 @@
-import { app, BrowserWindow, clipboard, globalShortcut, ipcMain, Menu, nativeImage, Notification, powerMonitor, screen, session, Tray } from 'electron';
+import { app, BrowserWindow, clipboard, globalShortcut, ipcMain, Menu, nativeImage, Notification, powerMonitor, safeStorage, screen, session, shell, Tray } from 'electron';
 import { spawn } from 'node:child_process';
 import { join } from 'node:path';
 import { writeFile } from 'node:fs/promises';
@@ -7,8 +7,11 @@ import { pipelineMachine } from './pipeline/machine';
 import { commandFromWakeTranscript, gateTranscriptDetailed } from './pipeline/gate';
 import { heuristicRoute, needsSelectionCapture, reconcileIntent } from './pipeline/router';
 import { captureSelectedText, pasteImage, pasteText } from './inject';
-import { PipelineError, type AuthProfile, type BehaviorSettings, type CaptureSource, type HandsFreeStatus, type HotkeyStatus, type HotkeyTestResult, type OverlaySnapshot, type UpdateNotice } from '../shared/contracts';
-import { readProviderSettings, saveProviderSettings } from './settings';
+import { PipelineError, type AuthProfile, type BehaviorSettings, type CaptureSource, type HandsFreeStatus, type HotkeyStatus, type HotkeyTestResult, type JobHistoryEntry, type OverlaySnapshot, type UpdateNotice } from '../shared/contracts';
+import { readProviderSettings, saveProviderSettings, secureStorageAvailable } from './settings';
+import { RecoveryStore, estimateDurationMs } from './recovery/recoveryStore';
+import { GroqBudget } from './recovery/groqBudget';
+import { RecoveryService } from './recovery/recoveryService';
 import { DEFAULT_BEHAVIOR, readBehavior, writeBehavior } from './behavior';
 import { ControlService } from './control/controlService';
 import { assessPlan, type Plan, type PlanOrigin } from './control/actions';
@@ -44,7 +47,7 @@ const linuxPasswordStore = linuxPasswordStorePreference(
 if (linuxPasswordStore) app.commandLine.appendSwitch('password-store', linuxPasswordStore);
 
 let mainWindow: BrowserWindow | undefined;
-/** The listening orb and status pill. Separate from the app window (main page, Settings, Live log). */
+/** The listening orb and status pill. Separate from the app window (Home, Recordings, Activity, Settings). */
 let overlayWindow: BrowserWindow | undefined;
 let tray: Tray | undefined;
 let snapshot: OverlaySnapshot = { state: 'idle', elapsedMs: 0, rms: 0 };
@@ -62,12 +65,31 @@ let activeShortcut = DEFAULT_GLOBAL_SHORTCUT;
 let shortcutRegistered = false;
 let lastHotkeyTimestamp = 0;
 let pendingShortcutTest: { resolve: (result: HotkeyTestResult) => void; timer: NodeJS.Timeout } | undefined;
-let settingsReturnState: { background: boolean; bounds: { x: number; y: number; width: number; height: number }; visible: boolean } | undefined;
 let settingsPanelOpen = false;
 let shortcutCaptureMode = false;
 let behavior: BehaviorSettings = DEFAULT_BEHAVIOR;
 const control = new ControlService();
 const engine = new EngineHost();
+
+// Failed requests keep their audio (encrypted) so they can be transcribed again from Recordings.
+const groqBudget = new GroqBudget();
+const recoveryStore = new RecoveryStore(join(app.getPath('userData'), 'recovery'), {
+  available: () => secureStorageAvailable(),
+  wrap: (plain) => safeStorage.encryptString(plain),
+  unwrap: (wrapped) => safeStorage.decryptString(wrapped)
+});
+const recovery = new RecoveryService({
+  store: recoveryStore,
+  budget: groqBudget,
+  transcribe: async (segments, mimeType) => transcribeWithGroq((await readProviderSettings()).groqApiKey, segments, mimeType),
+  log: (event, message, level = 'info') => logPipeline({ level, event, message })
+});
+recovery.on('change', () => {
+  void recovery.state().then((state) => sendToRenderer('recovery:update', state)).catch(() => undefined);
+});
+const jobHistory: JobHistoryEntry[] = [];
+let lastSavedJobId: string | undefined;
+let lastHistoryJobId: string | undefined;
 let wake: WakeService | undefined;
 let handsFreeStatus: HandsFreeStatus = { enabled: false, state: 'off', message: 'Hands-free is off.' };
 let wakeSessionActive = false;
@@ -434,20 +456,16 @@ function showMainWindow(): void {
 
 function openSettings(): void {
   if (!mainWindow || mainWindow.isDestroyed()) return;
-  const wasVisible = mainWindow.isVisible();
   if (!settingsPanelOpen) {
     shortcutCaptureMode = false;
     globalShortcut.setSuspended(false);
     settingsPanelOpen = true;
-    settingsReturnState = { background: !wasVisible, bounds: mainWindow.getBounds(), visible: wasVisible };
   }
   showMainWindow();
   sendToRenderer('settings:open');
 }
 
 function closeSettingsWindow(): void {
-  const previous = settingsReturnState;
-  settingsReturnState = undefined;
   settingsPanelOpen = false;
   shortcutCaptureMode = false;
   globalShortcut.setSuspended(false);
@@ -457,8 +475,7 @@ function closeSettingsWindow(): void {
     clearTimeout(test.timer);
     test.resolve({ success: false, message: 'Shortcut test ended because Settings was closed.' });
   }
-  // Settings opened from the tray while Tawny ran in the background: go back to the background.
-  if (previous && !previous.visible) enterBackground();
+  // Settings is a page of the app window now; leaving it never hides the window.
 }
 
 function openLogs(): void {
@@ -586,6 +603,20 @@ actor.subscribe((state) => {
     data: { state: nextState }
   });
   setEscapeShortcut(state.value !== 'idle');
+  if ((nextState === 'done' || nextState === 'failed') && activeJobId && lastHistoryJobId !== activeJobId) {
+    lastHistoryJobId = activeJobId;
+    jobHistory.unshift({
+      jobId: activeJobId,
+      at: new Date().toISOString(),
+      source: snapshot.source ?? 'hotkey',
+      ...(snapshot.intent ? { intent: snapshot.intent } : {}),
+      outcome: nextState,
+      message: (snapshot.message ?? (nextState === 'done' ? 'Done.' : 'Failed.')).slice(0, 240),
+      ...(lastSavedJobId === activeJobId ? { savedRecording: true } : {})
+    });
+    jobHistory.splice(40);
+    sendToRenderer('history:update', jobHistory);
+  }
   if (nextState === 'cancelled' || nextState === 'failed' || nextState === 'idle' || nextState === 'done') {
     resolveConfirmation(false);
     if (nextState !== 'done') controlAbort?.abort();
@@ -617,7 +648,7 @@ function handleUnexpectedError(kind: 'exception' | 'rejection', error: unknown):
   const state = snapshot.state;
   if (state !== 'idle' && state !== 'done' && state !== 'failed' && state !== 'cancelled') {
     try {
-      actor.send({ type: 'FAIL', message: 'Something went wrong inside Tawny. Try again; details are in the Live log.' });
+      actor.send({ type: 'FAIL', message: 'Something went wrong inside Tawny. Try again; details are in Activity.' });
     } catch {
       // The pipeline itself is broken; the log entry above is what remains.
     }
@@ -651,6 +682,33 @@ function handlePipelineEvent(event: 'HOTKEY' | 'STOP' | 'CANCEL' | 'CONFIRM'): v
 
 ipcMain.handle('overlay:get-snapshot', () => snapshot);
 ipcMain.handle('logs:get', () => getRecentLogs());
+ipcMain.handle('logs:open-folder', async () => {
+  const error = await shell.openPath(join(app.getPath('userData'), 'logs'));
+  if (error) throw new Error(error);
+});
+ipcMain.handle('history:get', () => jobHistory);
+ipcMain.handle('app:info', () => ({ version: app.getVersion(), platform: process.platform }));
+ipcMain.handle('app:window', (_event, action: unknown) => {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  if (action === 'minimize') mainWindow.minimize();
+  else if (action === 'hide') mainWindow.hide();
+});
+function requireId(value: unknown): string {
+  if (typeof value !== 'string' || !/^[\w-]{8,64}$/.test(value)) throw new Error('Unknown recording.');
+  return value;
+}
+ipcMain.handle('recovery:get', () => recovery.state());
+ipcMain.handle('recovery:retry', async (_event, id: unknown) => {
+  if (!authProfile) throw new Error('Sign in with Google before transcribing recordings.');
+  await recovery.retry(id === undefined ? undefined : requireId(id));
+});
+ipcMain.handle('recovery:remove', (_event, id: unknown) => recovery.remove(requireId(id)));
+ipcMain.handle('recovery:clear', () => recovery.clear());
+ipcMain.handle('recovery:copy', async (_event, id: unknown) => {
+  const item = await recoveryStore.get(requireId(id));
+  if (!item?.transcript) throw new Error('This recording has no text yet.');
+  clipboard.writeText(item.transcript);
+});
 ipcMain.on('capture:log', (_event, input: { event: string; message: string; level?: 'debug' | 'info' | 'warn' | 'error'; data?: Record<string, string> }) => {
   logPipeline({ ...input, jobId: activeJobId, stage: 'capture' });
   if (input.event === 'capture.failure') actor.send({ type: 'FAIL', message: input.message });
@@ -899,6 +957,8 @@ async function processAudio(segments: Uint8Array[], options: ProcessOptions): Pr
   const settings = await readProviderSettings();
   const totalBytes = segments.reduce((total, segment) => total + (segment?.byteLength ?? 0), 0);
   const wakeSource = options.source === 'wake';
+  const durationMs = estimateDurationMs(options.mimeType, segments);
+  let transcript: string | undefined;
   actor.send({ type: 'STAGE', stage: 'transcribing' });
   logPipeline({
     event: 'provider.start',
@@ -909,7 +969,8 @@ async function processAudio(segments: Uint8Array[], options: ProcessOptions): Pr
     data: { bytes: String(totalBytes), segments: String(segments.length), source: options.source }
   });
   try {
-    const transcript = await transcribeWithGroq(settings.groqApiKey, segments, options.mimeType, wakeSource ? WAKE_TRANSCRIPTION_HINT : undefined);
+    groqBudget.note(durationMs);
+    transcript = await transcribeWithGroq(settings.groqApiKey, segments, options.mimeType, wakeSource ? WAKE_TRANSCRIPTION_HINT : undefined);
     if (!transcript) {
       if (wakeSource) {
         discardJob('The hands-free clip had no recognizable speech.');
@@ -1118,8 +1179,26 @@ async function processAudio(segments: Uint8Array[], options: ProcessOptions): Pr
     actor.send({ type: 'SUCCESS', message: completionMessage });
     return dictation;
   } catch (error) {
-    const message = error instanceof Error ? error.message : 'Groq transcription failed.';
+    let message = error instanceof Error ? error.message : 'Groq transcription failed.';
     const pipelineError = error instanceof PipelineError ? error : undefined;
+    if (pipelineError?.retryAfterMs) groqBudget.blockFor(pipelineError.retryAfterMs);
+    // Keep the request so it can be transcribed again from Recordings (not when the person cancelled).
+    const jobId = activeJobId;
+    if (snapshot.state !== 'cancelled' && totalBytes > 0 && pipelineError?.cls !== 'cancelled') {
+      const kept = await recovery.keep({
+        source: options.source,
+        mimeType: options.mimeType,
+        segments,
+        durationMs,
+        reason: message,
+        stage: pipelineError?.stage ?? (transcript ? 'handle' : 'stt'),
+        ...(transcript ? { transcript } : {})
+      });
+      if (kept) {
+        lastSavedJobId = jobId;
+        message = `${message.replace(/\s+$/, '')} Saved in Recordings, so you can ${transcript ? 'copy the text' : 'transcribe it again'} there.`;
+      }
+    }
     logPipeline({
       level: 'error',
       event: 'pipeline.failure',
@@ -1251,6 +1330,9 @@ function ensureWake(): WakeService | undefined {
   wake.on('wake', (signal: { complete?: boolean }) => {
     startWakeSession();
     if (signal.complete) scheduleSentenceEnd();
+  });
+  wake.on('recycle', (reason: 'stalled' | 'scheduled') => {
+    logPipeline({ level: reason === 'stalled' ? 'warn' : 'info', event: 'handsfree.recycle', message: reason === 'stalled' ? 'The speech recognizer stopped sending audio; restarting it.' : 'Refreshing the speech recognizer (scheduled, during quiet).', data: { reason } });
   });
   wake.on('sentence_end', scheduleSentenceEnd);
   wake.on('speech', cancelSentenceEnd);

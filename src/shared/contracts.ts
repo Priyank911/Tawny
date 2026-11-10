@@ -154,3 +154,47 @@ export const cloudflareEnvelopeSchema = z.object({
   errors: z.array(z.unknown()).default([]),
   messages: z.array(z.unknown()).default([])
 });
+
+/** A failed request whose audio is kept (encrypted) so it can be transcribed again. */
+export interface RecoveryRecording {
+  id: string;
+  createdAt: string;
+  source: CaptureSource;
+  mimeType: string;
+  bytes: number;
+  durationMs: number;
+  /** Why the original request failed. */
+  reason: string;
+  stage: string;
+  status: 'pending' | 'working' | 'waiting' | 'failed' | 'transcribed';
+  attempts: number;
+  hasAudio: boolean;
+  transcript?: string;
+  /** Latest retry failure, or why it is waiting. */
+  lastError?: string;
+  /** ISO time before which Groq should not be asked again. */
+  retryAfter?: string;
+}
+
+export interface RecoveryState {
+  available: boolean;
+  recordings: RecoveryRecording[];
+  budget: {
+    requestsLastMinute: number;
+    requestsToday: number;
+    audioSecondsLastHour: number;
+    audioSecondsToday: number;
+    limits: { requestsPerMinute: number; requestsPerDay: number; audioSecondsPerHour: number; audioSecondsPerDay: number };
+  };
+}
+
+/** One finished request, for the Home page's recent list. No transcript text. */
+export interface JobHistoryEntry {
+  jobId: string;
+  at: string;
+  source: CaptureSource;
+  intent?: Intent;
+  outcome: 'done' | 'failed';
+  message: string;
+  savedRecording?: boolean;
+}

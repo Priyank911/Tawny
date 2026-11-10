@@ -18,7 +18,7 @@ Tawny is an Electron desktop app with three runtime layers:
 
 | Window | Loads | Shows | Never |
 | --- | --- | --- | --- |
-| App window | `index.html?view=main` | Main page, sign-in, Settings, Live log, update notice | Resized into the pill, records audio |
+| App window | `index.html?view=main` | Rail with Home, Recordings, Activity and Settings pages; sign-in; update strip | Resized into the pill, records audio |
 | Overlay window | `index.html?view=overlay` | Listening orb and status pill at the top centre; owns the shortcut recorder | Takes focus (it is non-focusable, so the app you were in stays the paste target) |
 | Engine window (hands-free only) | `engine.html` | Nothing (hidden); always-on microphone | Exists while hands-free is off |
 
@@ -118,6 +118,7 @@ wake → engine.beginSession → clip (command, often with the wake phrase) → 
 - Neither microphone path uses automatic gain control: Chromium's gain control changes the Windows microphone volume itself, which the shared wake recognizer depends on.
 - The endpointer has three phases: the wake phrase itself, a grace period if only the phrase was said, then the command, which ends after about 1.4 s of silence, on “Tawny send it”, on Esc, or at 60 s.
 - Everything audio-related that does not need a browser lives in `src/shared/audio` and is unit-tested with synthetic audio. The hotkey path still records with `MediaRecorder` and is unchanged.
+- Watchdog: `tawny-wake.exe` emits a `level` heartbeat every 5 s and exits whenever live recognition completes (the input stream can end silently when a device sleeps or switches). `WakeService` restarts a helper that has been silent for 30 s, and refreshes a healthy one every 20 minutes after 8 s of quiet. Neither counts toward the crash-restart limit. Log event: `handsfree.recycle`.
 - The engine window exists only while hands-free is on, so turning it off releases the microphone. Lock and sleep pause it.
 
 ## Computer control
@@ -143,6 +144,10 @@ Electron `safeStorage` is required. Signing out removes the persisted Firebase s
 `src/main/logger.ts` keeps a bounded in-memory log and appends JSONL locally. Logs include event names, timing, state, byte/character counts, and sanitized errors; they must not include API credentials, transcripts, or selected text.
 
 Renderer `unresponsive`, `responsive`, and `render-process-gone` events are recorded locally for each window, and a crashed window is reloaded once. An unexpected exception or rejection in the main process is logged (`main.exception`, `main.rejection`) and fails the job in progress with a message, instead of Electron's crash dialog.
+
+### Recording recovery
+
+When a job fails after audio was captured (and was not cancelled), `processAudio` hands the audio, the error and any transcript to `RecoveryService.keep` (`src/main/recovery`). `RecoveryStore` writes AES-256-GCM files under `userData/recovery/` with a random key wrapped by `safeStorage`; without secure storage nothing is kept. **Transcribe again** queues retries one at a time. `GroqBudget` counts every Groq call (live ones too) in rolling windows against the free-tier limits for `whisper-large-v3-turbo`: 20 requests/min with 4 kept free for live use, 2,000/day, 7,200 audio-s/hour and 28,800/day, billed at least 10 s each. It waits up to 65 s when a retry would exceed a limit, and otherwise marks the recording as waiting. A 429's `retry-after` blocks retries until then. A WAV over 24 MB is split into valid pieces. On success the audio is deleted and only the text is kept. See `docs/DESIGN-APP-SHELL.md`.
 
 ### Updates
 

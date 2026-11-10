@@ -55,6 +55,12 @@ const failures = [];
 const caught = new Map();
 for (const wav of wavs) {
   const run = spawnSync(helper, ['--wav', join(dir, wav)], { encoding: 'utf8', timeout: 30000 });
+  // Smart App Control / WDAC refuses a freshly built unsigned helper on some PCs (same as build-native).
+  if (run.error && ['UNKNOWN', 'EACCES', 'EPERM'].includes(run.error.code) && !process.env.CI) {
+    console.warn(`test-wake: WARNING: Windows blocked running the freshly built helper (${run.error.code}), most likely Smart App Control. Skipping locally; CI runs this test before every release.`);
+    rmSync(dir, { recursive: true, force: true });
+    process.exit(0);
+  }
   const lines = (run.stdout ?? '').split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line));
   const error = lines.find((line) => line.t === 'error');
   if (error?.code === 'no_recognizer') {

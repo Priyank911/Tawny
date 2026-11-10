@@ -212,3 +212,60 @@ describe('WakeService', () => {
     expect(service.current.message).toContain('ENOENT');
   });
 });
+
+describe('WakeService watchdog', () => {
+  function watched() {
+    let now = 0;
+    const children: FakeChild[] = [];
+    const service = new WakeService({
+      spawner: () => { const child = new FakeChild(); children.push(child); return child; },
+      setTimer: () => 0,
+      clearTimer: () => undefined,
+      watchdog: { setInterval: () => 1, clearInterval: () => undefined, now: () => now, stallMs: 30_000, recycleAfterMs: 20 * 60_000, quietMs: 8_000 }
+    });
+    const recycles: string[] = [];
+    service.on('recycle', (reason: string) => recycles.push(reason));
+    return { service, children, recycles, advance: (ms: number) => { now += ms; } };
+  }
+
+  it('restarts a recognizer whose audio heartbeat stopped, without counting a crash', () => {
+    const { service, children, recycles, advance } = watched();
+    service.start();
+    children[0].say({ t: 'ready' });
+    advance(20_000);
+    children[0].say({ t: 'level', l: 3 });
+    service.checkHealth();
+    expect(recycles).toEqual([]);
+    advance(31_000);
+    service.checkHealth();
+    expect(recycles).toEqual(['stalled']);
+    expect(children[0].killed).toBe(true);
+    children[0].exit(0);
+    expect(children).toHaveLength(2);
+    children[1].say({ t: 'ready' });
+    expect(service.current.state).toBe('listening');
+  });
+
+  it('recycles a long-running recognizer only during quiet', () => {
+    const { service, children, recycles, advance } = watched();
+    service.start();
+    children[0].say({ t: 'ready' });
+    advance(20 * 60_000 + 1);
+    children[0].say({ t: 'hyp', text: 'some dictation' });
+    service.checkHealth();
+    expect(recycles).toEqual([]);
+    advance(9_000);
+    children[0].say({ t: 'level', l: 1 });
+    service.checkHealth();
+    expect(recycles).toEqual(['scheduled']);
+  });
+
+  it('a live-input end is followed by a normal restart', () => {
+    const { service, children } = watched();
+    service.start();
+    children[0].say({ t: 'ready' });
+    children[0].say({ t: 'end', reason: 'input_ended' });
+    children[0].exit(0);
+    expect(service.current.message).toContain('Restarting');
+  });
+});
